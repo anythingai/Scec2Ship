@@ -1,0 +1,3 @@
+ticket_id,created_at,summary,severity,freq_estimate
+SUP-001,2026-01-10,Onboarding steps unclear,high,12
+SUP-002,2026-01-12,Could not find setup checklist,med,8

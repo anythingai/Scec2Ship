@@ -1,0 +1,3 @@
+metric,current_value,target_value,notes
+onboarding_completion_rate,34,55,Needs improvement before release
+time_to_first_value_minutes,18,10,Users taking too long to activate
