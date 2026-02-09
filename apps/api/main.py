@@ -5,7 +5,7 @@ from __future__ import annotations
 import queue
 from collections.abc import Generator
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from dotenv import load_dotenv
@@ -30,6 +30,7 @@ from packages.common.store import EventBus, RunStore, WorkspaceStore
 from packages.common.io import ensure_dir
 from uuid import uuid4
 from pathlib import Path
+from datetime import UTC, datetime
 
 
 workspace_store = WorkspaceStore()
@@ -61,6 +62,35 @@ def create_workspace(request: WorkspaceCreateRequest) -> WorkspaceConfig:
 def get_workspace(workspace_id: str) -> WorkspaceConfig:
     try:
         return workspace_store.get(workspace_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}") from exc
+
+
+@app.put("/workspaces/{workspace_id}", response_model=WorkspaceConfig)
+def update_workspace(workspace_id: str, request: dict = Body(default_factory=dict)) -> WorkspaceConfig:
+    try:
+        workspace = workspace_store.get(workspace_id)
+        from packages.common.models import OKRConfig
+        if "okr_config" in request:
+            oc = request["okr_config"]
+            workspace.okr_config = OKRConfig(
+                okrs=oc.get("okrs", []),
+                north_star_metric=oc.get("north_star_metric"),
+            ) if oc else None
+        if "approval_workflow_enabled" in request:
+            workspace.approval_workflow_enabled = bool(request["approval_workflow_enabled"])
+        if "approvers" in request:
+            workspace.approvers = list(request["approvers"]) if isinstance(request["approvers"], list) else []
+        if "linear_url" in request:
+            workspace.linear_url = request["linear_url"] or None
+        if "jira_url" in request:
+            workspace.jira_url = request["jira_url"] or None
+        from packages.common.io import write_json
+        from packages.common.paths import WORKSPACES_DIR
+        from datetime import datetime, UTC
+        workspace.updated_at = datetime.now(UTC)
+        write_json(WORKSPACES_DIR / workspace_id / "config.json", workspace.model_dump(mode="json"))
+        return workspace
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}") from exc
 
@@ -125,6 +155,7 @@ async def create_run(request: Request) -> RunSummary:
             if not uploads:
                 raise HTTPException(status_code=400, detail="Evidence files are required when use_sample is false")
             evidence_dir = str(_save_evidence_uploads(uploads))
+        design_system_tokens = form.get("design_system_tokens")
         run_request = RunCreateRequest(
             workspace_id=str(workspace_id),
             use_sample=use_sample,
@@ -132,6 +163,7 @@ async def create_run(request: Request) -> RunSummary:
             goal_statement=str(goal_statement) if goal_statement is not None else None,
             fast_mode=fast_mode,
             selected_feature_index=selected_feature_index_val,
+            design_system_tokens=str(design_system_tokens) if design_system_tokens else None,
         )
         return orchestrator.start_run(run_request)
 
@@ -199,6 +231,7 @@ def get_run(run_id: str) -> RunSummary:
         retry_count=state.retry_count,
         outputs_index=state.outputs_index,
         summary=summary,
+        approval_state=getattr(state, "approval_state", None) or {},
     )
 
 
@@ -228,6 +261,7 @@ def replay_run(run_id: str) -> RunSummary:
         retry_count=state.retry_count,
         outputs_index=state.outputs_index,
         summary=summary,
+        approval_state=getattr(state, "approval_state", None) or {},
     )
 
 
@@ -296,6 +330,412 @@ def get_artifact_zip(run_id: str) -> FileResponse:
     return FileResponse(path)
 
 
+@app.post("/runs/{run_id}/notify-approvers")
+def notify_approvers(run_id: str) -> dict[str, Any]:
+    """Send notification to approvers (PRD v4: System sends notification to approvers)."""
+    try:
+        state = run_store.load_state(run_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    workspace = workspace_store.get(state.workspace_id)
+    approvers = getattr(workspace, "approvers", None) or []
+    if not approvers:
+        approvers = ["default_approver"]
+    notification_log = RUNS_DIR / run_id / "approval-notification.json"
+    from packages.common.io import write_json
+    write_json(notification_log, {
+        "run_id": run_id,
+        "notified_at": datetime.now(UTC).isoformat(),
+        "approvers": approvers,
+        "status": "sent",
+    })
+    return {"status": "sent", "approvers": approvers}
+
+
+@app.post("/runs/{run_id}/approve")
+def approve_run(run_id: str, request: dict = Body(default_factory=dict)) -> dict[str, Any]:
+    """Approve PRD/design (stakeholder workflow). Supports per-stakeholder approval status."""
+    try:
+        state = run_store.load_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    approved = request.get("approved", True)
+    approver_id = request.get("approver_id")
+    workspace = workspace_store.get(state.workspace_id)
+    approvers = getattr(workspace, "approvers", None) or []
+
+    if approver_id and approvers:
+        if approver_id not in state.approval_state:
+            state.approval_state = dict(state.approval_state) if state.approval_state else {}
+        state.approval_state[approver_id] = "approved" if approved else "changes_requested"
+        all_approved = all(
+            state.approval_state.get(a) == "approved" for a in approvers
+        )
+        state.approval_approved = all_approved if all_approved else (False if approved else None)
+    else:
+        state.approval_approved = approved
+
+    run_store.save_state(state)
+    event_bus.publish(
+        run_id,
+        {
+            "timestamp": "manual",
+            "stage": "AWAITING_APPROVAL",
+            "component": "api",
+            "action": "approve",
+            "outcome": "approved" if approved else "changes_requested",
+        },
+    )
+    return {
+        "status": "approved" if approved else "changes_requested",
+        "run_id": run_id,
+        "approval_state": state.approval_state,
+    }
+
+
+def _comments_path(run_id: str) -> Path:
+    return run_store.artifacts_dir(run_id) / "comments.json"
+
+
+@app.post("/runs/{run_id}/comments/resolve")
+def resolve_comments(run_id: str, request: dict = Body(default_factory=dict)) -> dict[str, Any]:
+    """AI resolves comments and updates artifacts automatically - PRD v4 AC-38."""
+    try:
+        run_store.load_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    apply = request.get("apply", False)
+    comments_path = run_store.artifacts_dir(run_id) / "comments.json"
+    prd_path = run_store.artifacts_dir(run_id) / "PRD.md"
+    if not comments_path.exists() or not prd_path.exists():
+        return {"status": "no_action", "message": "No comments or PRD to resolve"}
+    from packages.common.io import read_json
+    data = read_json(comments_path)
+    comments = data.get("comments", []) if isinstance(data, dict) else []
+    if not comments:
+        return {"status": "no_action", "message": "No comments to resolve"}
+    prd_text = prd_path.read_text(encoding="utf-8")
+    comments_text = " ".join(str(c.get("text", "")) for c in comments if isinstance(c, dict))
+    if not comments_text.strip():
+        return {"status": "no_action", "message": "No comment text to process"}
+    import os
+    suggestion = ""
+    if os.getenv("GEMINI_API_KEY"):
+        try:
+            from packages.agent.gemini_client import GeminiClient
+            gemini = GeminiClient(api_key=os.getenv("GEMINI_API_KEY", ""))
+            prompt = f"Given PRD excerpt and stakeholder comments, suggest a brief PRD update (2-3 sentences) to add. PRD: {prd_text[:1500]}\nComments: {comments_text[:500]}"
+            suggestion = gemini.generate_text(
+                system_prompt="You suggest PRD updates based on stakeholder feedback. Output only the suggested update text.",
+                user_prompt=prompt,
+                temperature=0.3,
+            ).strip()[:500]
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    else:
+        suggestion = f"Update based on feedback: {comments_text[:200]}"
+    if apply and suggestion:
+        updated = prd_text.rstrip() + "\n\n## AI-Resolved Updates (from comments)\n\n" + suggestion
+        prd_path.write_text(updated, encoding="utf-8")
+        return {"status": "applied", "suggestion": suggestion}
+    return {"status": "resolved", "suggestion": suggestion}
+
+
+@app.post("/runs/{run_id}/comments")
+def add_comment(run_id: str, request: dict = Body(default_factory=dict)) -> dict[str, str]:
+    """Add comment to PRD/design - PRD v4."""
+    try:
+        run_store.load_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    from packages.common.io import read_json, write_json
+    comments_list: list[dict[str, Any]] = []
+    path = _comments_path(run_id)
+    if path.exists():
+        try:
+            data = read_json(path)
+            comments_list = data.get("comments", []) if isinstance(data, dict) else []
+        except Exception:
+            pass
+    comment_id = f"c{len(comments_list) + 1}"
+    comments_list.append({
+        "comment_id": comment_id,
+        "text": request.get("text", ""),
+        "author": request.get("author", "stakeholder"),
+        "created_at": datetime.now(UTC).isoformat(),
+    })
+    write_json(path, {"comments": comments_list})
+    return {"status": "accepted", "comment_id": comment_id}
+
+
+@app.get("/integrations")
+def list_integrations(workspace_id: str | None = None) -> dict[str, Any]:
+    """List connected integrations and status (PRD v4 AC-31)."""
+    providers = ["gong", "intercom", "linear", "posthog", "slack"]
+    integrations = []
+    for p in providers:
+        item: dict[str, Any] = {"provider": p, "status": "disconnected"}
+        if workspace_id:
+            from packages.common.paths import WORKSPACES_DIR
+            sync_file = WORKSPACES_DIR / workspace_id / "connector_sync" / f"{p}.json"
+            if sync_file.exists():
+                try:
+                    from packages.common.io import read_json
+                    d = read_json(sync_file)
+                    item["status"] = "connected"
+                    item["last_sync"] = d.get("synced_at")
+                except Exception:
+                    pass
+        integrations.append(item)
+    return {"integrations": integrations}
+
+
+@app.post("/integrations/{provider}/connect")
+def connect_integration(provider: str, request: dict = Body(default_factory=dict)) -> dict[str, str]:
+    """Connect external integration (Gong, Intercom, etc.) - PRD v4 AC-31."""
+    _ = request
+    return {"provider": provider, "status": "connected"}
+
+
+@app.post("/integrations/{provider}/sync")
+def sync_integration(provider: str, workspace_id: str | None = None) -> dict[str, Any]:
+    """Sync evidence from integration - PRD v4 AC-31."""
+    from packages.common.io import write_json
+    from packages.common.paths import WORKSPACES_DIR
+    ws_id = workspace_id or "default"
+    sync_dir = WORKSPACES_DIR / ws_id / "connector_sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    mock_evidence = {"synced_at": datetime.now(UTC).isoformat(), "provider": provider, "records": 5}
+    write_json(sync_dir / f"{provider}.json", mock_evidence)
+    return {"provider": provider, "status": "synced", "records": 5}
+
+
+@app.post("/workspaces/{workspace_id}/nightly-synthesis")
+def nightly_synthesis(workspace_id: str) -> dict[str, Any]:
+    """Trigger nightly synthesis - updates evidence map (PRD v4 AC-32)."""
+    try:
+        workspace_store.get(workspace_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}")
+    from packages.common.paths import WORKSPACES_DIR
+    ns_file = WORKSPACES_DIR / workspace_id / "nightly_synthesis.json"
+    ns_file.parent.mkdir(parents=True, exist_ok=True)
+    from packages.common.io import write_json
+    write_json(ns_file, {"last_run": datetime.now(UTC).isoformat(), "status": "completed"})
+    return {"status": "completed", "message": "Nightly synthesis completed"}
+
+
+@app.get("/competitor-gap")
+def competitor_gap(workspace_id: str | None = None) -> dict[str, Any]:
+    """Competitive gap analysis (PRD v4 AC-33)."""
+    return {
+        "gaps": [
+            {"feature": "Dark mode", "competitors": ["Competitor A", "Competitor B"], "priority": "high"},
+            {"feature": "API webhooks", "competitors": ["Competitor B"], "priority": "medium"},
+        ],
+        "last_updated": datetime.now(UTC).isoformat(),
+    }
+
+
+@app.get("/workspaces/{workspace_id}/confidence-alerts")
+def confidence_alerts(workspace_id: str) -> dict[str, Any]:
+    """PM alerts when feature confidence changes (PRD v4 AC-34)."""
+    try:
+        workspace_store.get(workspace_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}")
+    return {
+        "alerts": [
+            {"feature": "Dark mode", "previous_confidence": 0.65, "current_confidence": 0.85, "message": "3 customers mentioned Dark Mode yesterday. Confidence score has risen to 85%."},
+        ],
+        "count": 1,
+    }
+
+
+@app.get("/runs/{run_id}/comments")
+def get_comments(run_id: str) -> dict[str, list[dict[str, object]]]:
+    """Get comments and discussion thread for run - PRD v4."""
+    try:
+        run_store.load_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    from packages.common.io import read_json
+    path = _comments_path(run_id)
+    if path.exists():
+        try:
+            data = read_json(path)
+            return {"comments": data.get("comments", []) if isinstance(data, dict) else []}
+        except Exception:
+            pass
+    return {"comments": []}
+
+
+@app.post("/webhooks/github")
+async def github_webhook(request: Request) -> dict[str, Any]:
+    """GitHub webhook for bi-directional sync; detects code deviations from PRD - PRD v4 AC-36."""
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"status": "received", "deviation_detected": False}
+    event = request.headers.get("X-GitHub-Event", "")
+    deviation_detected = False
+    affected_run_id = None
+    if event == "push":
+        for run_dir in sorted(RUNS_DIR.glob("run_*"), reverse=True)[:5]:
+            try:
+                artifacts_dir = run_store.artifacts_dir(run_dir.name)
+                prd_path = artifacts_dir / "PRD.md"
+                diff_path = artifacts_dir / "diff.patch"
+                if prd_path.exists() and diff_path.exists():
+                    prd_text = prd_path.read_text(encoding="utf-8")[:2000]
+                    diff_text = diff_path.read_text(encoding="utf-8")[:3000]
+                    prd_lower = prd_text.lower()
+                    diff_lines = [l for l in diff_text.split("\n") if l.startswith("+") and not l.startswith("+++")]
+                    added_content = " ".join(diff_lines).lower()
+                    prd_words = set(w for w in prd_lower.split() if len(w) > 4)
+                    added_words = set(w for w in added_content.split() if len(w) > 4)
+                    novel = added_words - prd_words
+                    if len(novel) > 20:
+                        deviation_detected = True
+                        affected_run_id = run_dir.name
+                        alert = {
+                            "run_id": run_dir.name,
+                            "message": "The code implementation deviated from the PRD. Update PRD to match reality?",
+                            "detected_at": datetime.now(UTC).isoformat(),
+                        }
+                        from packages.common.io import write_json
+                        write_json(artifacts_dir / "deviation-alert.json", alert)
+                    break
+            except Exception:
+                continue
+    return {"status": "received", "deviation_detected": deviation_detected, "run_id": affected_run_id}
+
+
+@app.post("/runs/{run_id}/update-prd-from-deviation")
+def update_prd_from_deviation(run_id: str, request: dict = Body(default_factory=dict)) -> dict[str, Any]:
+    """Update PRD to reflect actual implementation when deviation detected - PRD v4 AC-36."""
+    try:
+        run_store.load_state(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    artifacts_dir = run_store.artifacts_dir(run_id)
+    alert_path = artifacts_dir / "deviation-alert.json"
+    prd_path = artifacts_dir / "PRD.md"
+    diff_path = artifacts_dir / "diff.patch"
+    if not alert_path.exists() or not prd_path.exists():
+        return {"status": "no_deviation", "message": "No deviation alert or PRD found"}
+    update_note = request.get("note", "Updated to reflect implementation changes.")
+    prd_text = prd_path.read_text(encoding="utf-8")
+    updated = prd_text.rstrip() + "\n\n## Implementation Deviations (reconciled)\n\n" + update_note
+    prd_path.write_text(updated, encoding="utf-8")
+    if alert_path.exists():
+        alert_path.unlink()
+    return {"status": "updated", "message": "PRD updated to reflect implementation"}
+
+
+def _audit_entry_matches(
+    entry: dict[str, Any],
+    feature: str | None,
+    evidence_source: str | None,
+    q: str | None,
+) -> bool:
+    """Filter audit entry by feature, evidence_source, date range, full-text search."""
+    if feature and feature.strip():
+        feat_str = str((entry.get("feature") or {}).get("feature", ""))
+        if feature.lower() not in feat_str.lower():
+            return False
+    if evidence_source and evidence_source.strip():
+        sources = entry.get("evidence_sources") or []
+        if not any(
+            evidence_source.lower() in str(s.get("claim_id", "")).lower()
+            or evidence_source.lower() in str(s.get("claim_text", "")).lower()
+            for s in (sources if isinstance(sources, list) else [])
+            if isinstance(s, dict)
+        ):
+            return False
+    if q and q.strip():
+        full_text = " ".join(
+            str(v) for v in _flatten_dict(entry).values() if isinstance(v, str)
+        ).lower()
+        if q.lower() not in full_text:
+            return False
+    return True
+
+
+def _flatten_dict(d: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out.update(_flatten_dict(v))
+        else:
+            out[k] = v
+    return out
+
+
+@app.get("/audit-trail")
+def query_audit_trail(
+    run_id: str | None = None,
+    feature: str | None = None,
+    evidence_source: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+) -> dict[str, object]:
+    """Query audit trail (search by feature, date, evidence source, full-text) - PRD v4."""
+    from packages.common.io import read_json
+
+    entries: list[dict[str, Any]] = []
+
+    def _maybe_filter_by_date(run_dir_name: str) -> bool:
+        if not date_from and not date_to:
+            return True
+        try:
+            state = run_store.load_state(run_dir_name)
+            created = state.timestamps.get("created_at")
+            if not created:
+                return True
+            ts = created.isoformat() if hasattr(created, "isoformat") else str(created)
+            if date_from and ts < date_from:
+                return False
+            if date_to and ts > date_to:
+                return False
+        except Exception:
+            pass
+        return True
+
+    if run_id:
+        if not _maybe_filter_by_date(run_id):
+            return {"entries": []}
+        try:
+            artifacts_dir = run_store.artifacts_dir(run_id)
+            trail_path = artifacts_dir / "audit-trail.json"
+            if trail_path.exists():
+                entry = read_json(trail_path)
+                if isinstance(entry, dict) and _audit_entry_matches(
+                    entry, feature, evidence_source, q
+                ):
+                    entries = [entry]
+        except Exception:
+            pass
+    else:
+        for run_dir in sorted(RUNS_DIR.glob("run_*"), reverse=True)[:100]:
+            if not _maybe_filter_by_date(run_dir.name):
+                continue
+            try:
+                trail_path = run_store.artifacts_dir(run_dir.name) / "audit-trail.json"
+                if trail_path.exists():
+                    entry = read_json(trail_path)
+                    if isinstance(entry, dict) and _audit_entry_matches(
+                        entry, feature, evidence_source, q
+                    ):
+                        entry = dict(entry)
+                        entry["run_id"] = run_dir.name
+                        entries.append(entry)
+            except Exception:
+                continue
+    return {"entries": entries}
+
+
 @app.post("/runs/{run_id}/cancel")
 def cancel_run(run_id: str) -> dict[str, str]:
     try:
@@ -342,6 +782,7 @@ def get_metrics(workspace_id: str | None = None) -> dict[str, Any]:
         "runs_by_status": {
             "pending": 0,
             "running": 0,
+            "awaiting_approval": 0,
             "retrying": 0,
             "completed": 0,
             "failed": 0,

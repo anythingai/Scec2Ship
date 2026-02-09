@@ -41,7 +41,8 @@ def validate_tickets_schema(payload: dict[str, Any]) -> None:
     # Validate each ticket
     required_fields = {"id", "title", "description", "acceptance_criteria", "files_expected", "risk_level", "estimate_hours"}
     valid_risk_levels = {"low", "med", "high"}
-    
+    risk_level_map = {"low": "low", "med": "med", "medium": "med", "high": "high"}
+
     for idx, ticket in enumerate(tickets):
         if not isinstance(ticket, dict):
             raise SchemaValidationError(f"tickets[{idx}] must be a dictionary", field=f"tickets[{idx}]")
@@ -88,12 +89,15 @@ def validate_tickets_schema(payload: dict[str, Any]) -> None:
                     field=f"tickets[{idx}].files_expected[{fe_idx}]"
                 )
         
-        # risk_level must be valid enum
-        if ticket["risk_level"] not in valid_risk_levels:
+        # risk_level must be valid enum (normalize "medium" -> "med")
+        raw = ticket["risk_level"]
+        normalized = risk_level_map.get(str(raw).lower().strip(), raw)
+        if normalized not in valid_risk_levels:
             raise SchemaValidationError(
                 f"tickets[{idx}].risk_level must be one of {valid_risk_levels}",
                 field=f"tickets[{idx}].risk_level"
             )
+        ticket["risk_level"] = normalized
         
         # estimate_hours must be number
         if not isinstance(ticket["estimate_hours"], (int, float)):

@@ -57,6 +57,29 @@ export function RunSummaryCard({ summary, failureMessage }: RunSummaryCardProps)
         <MetricBox label="Tickets" value={String(summary.totalTickets)} sub={`${summary.totalEstimateHours}h est.`} good />
       </div>
 
+      {(summary.okrAlignmentScore != null || summary.impactProjection) && (
+        <div className="mt-3 space-y-2 rounded-lg border border-border bg-secondary/30 p-3">
+          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Strategic Alignment</span>
+          {summary.okrAlignmentScore != null && (
+            <div className="text-xs">
+              <span className="text-muted-foreground">OKR alignment: </span>
+              <span className="font-semibold text-foreground">{summary.okrAlignmentScore}/100</span>
+            </div>
+          )}
+          {summary.impactProjection && (
+            <details className="group">
+              <summary className="cursor-pointer text-xs font-medium text-foreground hover:text-primary">
+                Impact simulation
+                {summary.impactConfidenceInterval && (
+                  <span className="ml-2 text-muted-foreground font-normal">({summary.impactConfidenceInterval})</span>
+                )}
+              </summary>
+              <p className="mt-2 text-xs text-muted-foreground pl-0">{summary.impactProjection}</p>
+            </details>
+          )}
+        </div>
+      )}
+
       {summary.filesChanged.length > 0 && (
         <div className="mt-3 space-y-1">
           <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Files Changed</span>

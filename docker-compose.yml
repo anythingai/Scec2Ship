@@ -9,7 +9,7 @@ services:
       - ./apps/api/.env
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.0-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3-pro-preview}
     volumes:
       - ./data/runs:/app/data/runs
       - ./data/workspaces:/app/data/workspaces

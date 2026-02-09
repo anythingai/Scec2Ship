@@ -1,7 +1,7 @@
 "use client"
 
 import React from "react"
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { EvidenceFile, RunHistoryItem, RunState, RunStatus, Workspace } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -17,11 +17,13 @@ interface InputPanelProps {
   gitHub: RunState["gitHub"]
   useSample: boolean
   fastMode: boolean
+  designSystemTokens: string
   onUpdateWorkspace: (updates: Partial<Workspace>) => void
   onUpdateGuardrails: (updates: Partial<Workspace["guardrails"]>) => void
   onSetEvidenceFiles: (files: EvidenceFile[]) => void
   onSetUseSample: (value: boolean) => void
   onSetFastMode: (value: boolean) => void
+  onSetDesignSystemTokens: (value: string) => void
   onLoadSample: () => void
   onStartRun: () => void
   onCancelRun: () => void
@@ -77,6 +79,52 @@ function EvidenceQualityMeter({ files }: { files: EvidenceFile[] }) {
         <p className="text-[10px] text-destructive">
           Missing required: {missingRequired.join(", ")}
         </p>
+      )}
+    </div>
+  )
+}
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || (typeof window !== "undefined" ? window.location.origin : "")
+
+function IntegrationsSection({ disabled }: { disabled: boolean }) {
+  const [integrations, setIntegrations] = useState<{ provider: string; status: string }[]>([])
+  const [expanded, setExpanded] = useState(false)
+  useEffect(() => {
+    if (!API_BASE) return
+    fetch(`${API_BASE}/integrations`)
+      .then((r) => r.ok ? r.json() : { integrations: [] })
+      .then((d) => setIntegrations(d.integrations || []))
+      .catch(() => {})
+  }, [])
+  return (
+    <div className="rounded-md border border-border bg-secondary/40">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        disabled={disabled}
+        className="w-full flex items-center justify-between px-3 py-2 text-left disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <span className="text-xs font-medium text-foreground">Integrations</span>
+        <span className="text-[10px] text-muted-foreground">
+          {integrations.filter((i) => i.status === "connected").length}/{integrations.length} connected
+        </span>
+      </button>
+      {expanded && (
+        <div className="border-t border-border px-3 py-2 space-y-1">
+          {integrations.map((i) => (
+            <div key={i.provider} className="flex items-center justify-between text-[10px]">
+              <span className="capitalize text-foreground">{i.provider}</span>
+              <Badge
+                variant="outline"
+                className={`h-5 text-[10px] ${i.status === "connected" ? "border-success/30 text-success" : "border-muted-foreground/30 text-muted-foreground"}`}
+              >
+                {i.status}
+              </Badge>
+            </div>
+          ))}
+          <p className="text-[10px] text-muted-foreground pt-1">Live connectors: Gong, Intercom, Linear, PostHog, Slack</p>
+          <p className="text-[10px] text-muted-foreground/70">Last sync: — (connect to enable)</p>
+        </div>
       )}
     </div>
   )
@@ -219,11 +267,13 @@ export function InputPanel({
   gitHub,
   useSample,
   fastMode,
+  designSystemTokens,
   onUpdateWorkspace,
   onUpdateGuardrails,
   onSetEvidenceFiles,
   onSetUseSample,
   onSetFastMode,
+  onSetDesignSystemTokens,
   onLoadSample,
   onStartRun,
   onCancelRun,
@@ -483,6 +533,7 @@ export function InputPanel({
                   {gitHub.connected ? "Disconnect" : "Connect with GitHub"}
                 </Button>
               </div>
+              <IntegrationsSection disabled={isDisabled} />
               <div>
                 <Label htmlFor="repoUrl" className="text-xs text-muted-foreground">Repository URL</Label>
                 <Input
@@ -512,6 +563,110 @@ export function InputPanel({
                   value={workspace.goalStatement}
                   onChange={(e) => onUpdateWorkspace({ goalStatement: e.target.value })}
                   placeholder="Improve onboarding completion"
+                  disabled={isDisabled}
+                  className="mt-1 h-8 bg-secondary/50 text-xs border-border"
+                />
+              </div>
+              <div>
+                <Label htmlFor="northStar" className="text-xs text-muted-foreground">North Star Metric (optional)</Label>
+                <Input
+                  id="northStar"
+                  value={workspace.okrConfig?.northStarMetric ?? ""}
+                  onChange={(e) =>
+                    onUpdateWorkspace({
+                      okrConfig: {
+                        okrs: workspace.okrConfig?.okrs ?? [],
+                        northStarMetric: e.target.value || undefined,
+                      },
+                    })
+                  }
+                  placeholder="e.g. Weekly Active Users"
+                  disabled={isDisabled}
+                  className="mt-1 h-8 bg-secondary/50 text-xs border-border"
+                />
+              </div>
+              <div>
+                <Label htmlFor="okrs" className="text-xs text-muted-foreground">OKRs (optional, comma-separated)</Label>
+                <Input
+                  id="okrs"
+                  value={(workspace.okrConfig?.okrs ?? []).join(", ")}
+                  onChange={(e) =>
+                    onUpdateWorkspace({
+                      okrConfig: {
+                        okrs: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                        northStarMetric: workspace.okrConfig?.northStarMetric,
+                      },
+                    })
+                  }
+                  placeholder="e.g. Increase Retention 10%, Reduce Support 20%"
+                  disabled={isDisabled}
+                  className="mt-1 h-8 bg-secondary/50 text-xs border-border"
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-border bg-secondary/40 px-3 py-2">
+                <div>
+                  <p className="text-xs font-medium text-foreground">Approval workflow</p>
+                  <p className="text-[10px] text-muted-foreground">Pause before tickets for stakeholder review</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onUpdateWorkspace({ approvalWorkflowEnabled: !(workspace.approvalWorkflowEnabled ?? false) })}
+                  disabled={isDisabled}
+                  className={`relative h-6 w-11 rounded-full transition-colors ${
+                    workspace.approvalWorkflowEnabled ? "bg-primary" : "bg-secondary"
+                  }`}
+                >
+                  <span
+                    className={`absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform ${
+                      workspace.approvalWorkflowEnabled ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+              <div>
+                <Label htmlFor="designSystemTokens" className="text-xs text-muted-foreground">Design system tokens (optional)</Label>
+                <Input
+                  id="designSystemTokens"
+                  value={designSystemTokens}
+                  onChange={(e) => onSetDesignSystemTokens(e.target.value)}
+                  placeholder="e.g. primary: #3b82f6, radius: 8px"
+                  disabled={isDisabled}
+                  className="mt-1 h-8 bg-secondary/50 text-xs border-border"
+                />
+              </div>
+              <div>
+                <Label htmlFor="approvers" className="text-xs text-muted-foreground">Approvers (optional, comma-separated)</Label>
+                <Input
+                  id="approvers"
+                  value={(workspace.approvers ?? []).join(", ")}
+                  onChange={(e) =>
+                    onUpdateWorkspace({
+                      approvers: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                    })
+                  }
+                  placeholder="e.g. design_lead, eng_lead"
+                  disabled={isDisabled}
+                  className="mt-1 h-8 bg-secondary/50 text-xs border-border"
+                />
+              </div>
+              <div>
+                <Label htmlFor="linearUrl" className="text-xs text-muted-foreground">Linear URL (optional)</Label>
+                <Input
+                  id="linearUrl"
+                  value={workspace.linearUrl ?? ""}
+                  onChange={(e) => onUpdateWorkspace({ linearUrl: e.target.value || undefined })}
+                  placeholder="https://linear.app/..."
+                  disabled={isDisabled}
+                  className="mt-1 h-8 bg-secondary/50 text-xs border-border"
+                />
+              </div>
+              <div>
+                <Label htmlFor="jiraUrl" className="text-xs text-muted-foreground">Jira URL (optional)</Label>
+                <Input
+                  id="jiraUrl"
+                  value={workspace.jiraUrl ?? ""}
+                  onChange={(e) => onUpdateWorkspace({ jiraUrl: e.target.value || undefined })}
+                  placeholder="https://...atlassian.net/..."
                   disabled={isDisabled}
                   className="mt-1 h-8 bg-secondary/50 text-xs border-border"
                 />

@@ -13,6 +13,7 @@ export default function Page() {
     state,
     startRun,
     cancelRun,
+    approveRun,
     resetRun,
     loadSampleEvidence,
     setEvidenceFiles,
@@ -24,8 +25,10 @@ export default function Page() {
     disconnectGitHub,
     setUseSample,
     setFastMode,
+    setDesignSystemTokens,
     loadRunHistory,
     replayRun,
+    refreshArtifacts,
   } = useRunStore()
 
   const [mobileTab, setMobileTab] = useState<"input" | "pipeline" | "artifacts">("input")
@@ -75,11 +78,13 @@ export default function Page() {
             gitHub={state.gitHub}
             useSample={state.useSample}
             fastMode={state.fastMode}
+            designSystemTokens={state.designSystemTokens}
             onUpdateWorkspace={updateWorkspace}
             onUpdateGuardrails={updateGuardrails}
             onSetEvidenceFiles={setEvidenceFiles}
             onSetUseSample={setUseSample}
             onSetFastMode={setFastMode}
+            onSetDesignSystemTokens={setDesignSystemTokens}
             onLoadSample={loadSampleEvidence}
             onStartRun={startRun}
             onCancelRun={cancelRun}
@@ -107,6 +112,10 @@ export default function Page() {
             summary={state.summary}
             failureMessage={state.failureMessage}
             runId={state.runId}
+            onApproveRun={approveRun}
+            onRefreshArtifacts={refreshArtifacts}
+            linearUrl={state.workspace.linearUrl}
+            jiraUrl={state.workspace.jiraUrl}
           />
         </div>
       </div>
@@ -122,11 +131,13 @@ export default function Page() {
               gitHub={state.gitHub}
               useSample={state.useSample}
               fastMode={state.fastMode}
+              designSystemTokens={state.designSystemTokens}
               onUpdateWorkspace={updateWorkspace}
               onUpdateGuardrails={updateGuardrails}
               onSetEvidenceFiles={setEvidenceFiles}
               onSetUseSample={setUseSample}
               onSetFastMode={setFastMode}
+              onSetDesignSystemTokens={setDesignSystemTokens}
               onLoadSample={loadSampleEvidence}
               onStartRun={startRun}
               onCancelRun={cancelRun}
@@ -158,6 +169,10 @@ export default function Page() {
               summary={state.summary}
               failureMessage={state.failureMessage}
               runId={state.runId}
+              onApproveRun={approveRun}
+              onRefreshArtifacts={refreshArtifacts}
+              linearUrl={state.workspace.linearUrl}
+              jiraUrl={state.workspace.jiraUrl}
             />
           </div>
         )}

@@ -13,7 +13,7 @@ from google.generativeai.types import GenerationConfig
 class GeminiClient:
     def __init__(self, api_key: str, model: str | None = None) -> None:
         self.api_key = api_key
-        self.model_name = model or os.getenv("GEMINI_MODEL", "gemini-3.0-flash")
+        self.model_name = model or os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
         self._model = None
         if self.api_key:
             genai.configure(api_key=self.api_key)

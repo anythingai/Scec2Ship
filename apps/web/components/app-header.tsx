@@ -9,6 +9,7 @@ function StatusBadge({ status }: { status: RunStatus }) {
     idle: { label: "Ready", className: "bg-secondary text-secondary-foreground border-border" },
     pending: { label: "Pending", className: "bg-secondary text-secondary-foreground border-border" },
     running: { label: "Running", className: "bg-primary/15 text-primary border-primary/30" },
+    awaiting_approval: { label: "Awaiting Approval", className: "bg-warning/15 text-warning border-warning/30" },
     retrying: { label: "Retrying", className: "bg-warning/15 text-warning border-warning/30" },
     completed: { label: "Completed", className: "bg-success/15 text-success border-success/30" },
     failed: { label: "Failed", className: "bg-destructive/15 text-destructive border-destructive/30" },

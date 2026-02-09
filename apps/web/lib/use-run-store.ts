@@ -24,9 +24,11 @@ const STAGE_TO_ARTIFACT: Record<
 > = {
   SYNTHESIZE: { file: "evidence-map.json", key: "evidenceMap", type: "json" },
   GENERATE_PRD: { file: "PRD.md", key: "prd", type: "text" },
+  GENERATE_DESIGN: { file: "wireframes.html", key: "wireframes", type: "text" },
   GENERATE_TICKETS: { file: "tickets.json", key: "tickets", type: "json" },
   IMPLEMENT: { file: "diff.patch", key: "diff", type: "text" },
   VERIFY: { file: "test-report.md", key: "testReport", type: "text" },
+  EXPORT: { file: "audit-trail.json", key: "auditTrail", type: "json" },
 };
 
 const inferEvidenceType = (name: string): EvidenceFile["type"] => {
@@ -51,11 +53,18 @@ function initialState(): RunState {
     retryCount: 0,
     artifacts: {
       prd: null,
+      wireframes: null,
+      userFlow: null,
       tickets: null,
       ticketsEpicTitle: null,
       evidenceMap: null,
       diff: null,
       testReport: null,
+      auditTrail: null,
+      deviationAlert: null,
+      decisionMemo: null,
+      goToMarket: null,
+      analyticsSpec: null,
     },
     workspace: {
       teamName: "",
@@ -67,6 +76,8 @@ function initialState(): RunState {
         mode: "read_only",
         forbiddenPaths: [],
       },
+      okrConfig: null,
+      approvalWorkflowEnabled: false,
     },
     evidenceFiles: [],
     useSample: false,
@@ -74,6 +85,7 @@ function initialState(): RunState {
     selectedFeatureIndex: null,
     topFeatures: [],
     showFeatureSelection: false,
+    designSystemTokens: "",
     summary: null,
     showCitations: false,
     failureMessage: null,
@@ -290,6 +302,52 @@ export function useRunStore() {
       if (payload.artifacts.includes("test-report.md")) {
         updates.testReport = await fetchArtifactText(runId, "test-report.md");
       }
+      if (payload.artifacts.includes("wireframes.html")) {
+        updates.wireframes = await fetchArtifactText(runId, "wireframes.html");
+      }
+      if (payload.artifacts.includes("user-flow.mmd")) {
+        updates.userFlow = await fetchArtifactText(runId, "user-flow.mmd");
+      }
+      if (payload.artifacts.includes("audit-trail.json")) {
+        const text = await fetchArtifactText(runId, "audit-trail.json");
+        if (text) {
+          try {
+            updates.auditTrail = JSON.parse(text);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      if (payload.artifacts.includes("deviation-alert.json")) {
+        const text = await fetchArtifactText(runId, "deviation-alert.json");
+        if (text) {
+          try {
+            const parsed = JSON.parse(text);
+            updates.deviationAlert = parsed.run_id ? parsed : null;
+          } catch {
+            updates.deviationAlert = null;
+          }
+        } else {
+          updates.deviationAlert = null;
+        }
+      } else {
+        updates.deviationAlert = null;
+      }
+      if (payload.artifacts.includes("decision-memo.md")) {
+        updates.decisionMemo = await fetchArtifactText(runId, "decision-memo.md");
+      } else {
+        updates.decisionMemo = null;
+      }
+      if (payload.artifacts.includes("go-to-market.md")) {
+        updates.goToMarket = await fetchArtifactText(runId, "go-to-market.md");
+      } else {
+        updates.goToMarket = null;
+      }
+      if (payload.artifacts.includes("analytics-spec.json")) {
+        updates.analyticsSpec = await fetchArtifactText(runId, "analytics-spec.json");
+      } else {
+        updates.analyticsSpec = null;
+      }
       setArtifacts(updates);
     },
     [fetchArtifactText, normalizeEvidenceMap, normalizeTickets, setArtifacts],
@@ -303,6 +361,11 @@ export function useRunStore() {
       if (!text) return;
       if (descriptor.type === "json") {
         try {
+          if (descriptor.file === "audit-trail.json") {
+            const parsed = JSON.parse(text);
+            setArtifacts({ auditTrail: parsed } as Partial<RunState["artifacts"]>);
+            return;
+          }
           if (descriptor.file === "tickets.json") {
             const parsed = JSON.parse(text);
             const { tickets, epicTitle } = normalizeTickets(parsed);
@@ -379,6 +442,11 @@ export function useRunStore() {
             error: payload.error || undefined,
           });
           void loadArtifactForStage(runId, payload.stage);
+          if (payload.stage === "GENERATE_DESIGN" && status === "done") {
+            fetchArtifactText(runId, "user-flow.mmd").then((text) => {
+              if (text) setArtifacts({ userFlow: text });
+            });
+          }
         }
         if (payload.action === "feature_selection_required") {
           setState((prev) => ({
@@ -394,6 +462,13 @@ export function useRunStore() {
             showFeatureSelection: false,
           }));
         }
+        if (payload.stage === "AWAITING_APPROVAL" && payload.action === "approval_requested") {
+          setState((prev) => ({ ...prev, status: "awaiting_approval" }));
+          setStageStatus("AWAITING_APPROVAL", {
+            status: "running",
+            startedAt: payload.timestamp,
+          });
+        }
         if (
           payload.action === "run_completed" ||
           payload.action === "run_failed"
@@ -406,7 +481,7 @@ export function useRunStore() {
       };
       source.onerror = () => source.close();
     },
-    [addLog, handleRunComplete, loadArtifactForStage, setStageStatus],
+    [addLog, fetchArtifactText, handleRunComplete, loadArtifactForStage, setArtifacts, setStageStatus],
   );
 
   const startRun = useCallback(async () => {
@@ -419,6 +494,16 @@ export function useRunStore() {
         mode: state.workspace.guardrails.mode,
         forbidden_paths: state.workspace.guardrails.forbiddenPaths,
       },
+      okr_config: state.workspace.okrConfig
+        ? {
+            okrs: state.workspace.okrConfig.okrs,
+            north_star_metric: state.workspace.okrConfig.northStarMetric ?? null,
+          }
+        : null,
+      approval_workflow_enabled: state.workspace.approvalWorkflowEnabled ?? false,
+      approvers: state.workspace.approvers ?? [],
+      linear_url: state.workspace.linearUrl ?? null,
+      jira_url: state.workspace.jiraUrl ?? null,
     };
     const workspaceRes = await fetch(`${API_BASE}/workspaces`, {
       method: "POST",
@@ -457,6 +542,8 @@ export function useRunStore() {
         "selected_feature_index",
         String(state.selectedFeatureIndex),
       );
+    if (state.designSystemTokens)
+      runForm.append("design_system_tokens", state.designSystemTokens);
     if (!state.useSample) {
       state.evidenceFiles.forEach((file) => {
         if (file.file) runForm.append("files", file.file);
@@ -483,11 +570,18 @@ export function useRunStore() {
       })),
       artifacts: {
         prd: null,
+        wireframes: null,
+        userFlow: null,
         tickets: null,
         ticketsEpicTitle: null,
         evidenceMap: null,
         diff: null,
         testReport: null,
+        auditTrail: null,
+        deviationAlert: null,
+        decisionMemo: null,
+        goToMarket: null,
+        analyticsSpec: null,
       },
       failureMessage: null,
     }));
@@ -498,6 +592,7 @@ export function useRunStore() {
     state.fastMode,
     state.selectedFeatureIndex,
     state.evidenceFiles,
+    state.designSystemTokens,
     state.gitHub.connected,
     state.gitHub.token,
     subscribeToRun,
@@ -508,6 +603,27 @@ export function useRunStore() {
     await fetch(`${API_BASE}/runs/${state.runId}/cancel`, { method: "POST" });
     setState((prev) => ({ ...prev, status: "cancelled" }));
   }, [state.runId]);
+
+  const approveRun = useCallback(
+    async (approved: boolean) => {
+      if (!state.runId) return;
+      await fetch(`${API_BASE}/runs/${state.runId}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved }),
+      });
+      if (approved) {
+        setState((prev) => ({ ...prev, status: "running" }));
+      } else {
+        setState((prev) => ({ ...prev, status: "failed", failureMessage: "Changes requested" }));
+      }
+    },
+    [state.runId],
+  );
+
+  const setDesignSystemTokens = useCallback((value: string) => {
+    setState((prev) => ({ ...prev, designSystemTokens: value }));
+  }, []);
 
   const selectFeature = useCallback(
     async (index: number) => {
@@ -585,11 +701,18 @@ export function useRunStore() {
         logs: [],
         artifacts: {
           prd: null,
+          wireframes: null,
+          userFlow: null,
           tickets: null,
           ticketsEpicTitle: null,
           evidenceMap: null,
           diff: null,
           testReport: null,
+          auditTrail: null,
+          deviationAlert: null,
+          decisionMemo: null,
+          goToMarket: null,
+          analyticsSpec: null,
         },
       }));
       
@@ -615,6 +738,7 @@ export function useRunStore() {
     state,
     startRun,
     cancelRun,
+    approveRun,
     resetRun,
     loadSampleEvidence,
     setEvidenceFiles,
@@ -626,7 +750,9 @@ export function useRunStore() {
     disconnectGitHub,
     setUseSample,
     setFastMode,
+    setDesignSystemTokens,
     loadRunHistory,
     replayRun,
+    refreshArtifacts,
   };
 }

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 class RunStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
     RETRYING = "retrying"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -23,6 +24,8 @@ class StageId(str, Enum):
     SYNTHESIZE = "SYNTHESIZE"
     SELECT_FEATURE = "SELECT_FEATURE"
     GENERATE_PRD = "GENERATE_PRD"
+    GENERATE_DESIGN = "GENERATE_DESIGN"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
     GENERATE_TICKETS = "GENERATE_TICKETS"
     IMPLEMENT = "IMPLEMENT"
     VERIFY = "VERIFY"
@@ -36,11 +39,24 @@ class Guardrails(BaseModel):
     forbidden_paths: list[str] = Field(default_factory=lambda: ["/infra", "/payments"])
 
 
+class OKRConfig(BaseModel):
+    """Optional OKR and strategic context for feature alignment."""
+
+    okrs: list[str] = Field(default_factory=list)
+    north_star_metric: str | None = None
+
+
 class WorkspaceCreateRequest(BaseModel):
     team_name: str
     repo_url: str = "local://target-repo"
     branch: str = "main"
     guardrails: Guardrails = Field(default_factory=Guardrails)
+    okr_config: OKRConfig | None = None
+    approval_workflow_enabled: bool = False
+    approvers: list[str] = Field(default_factory=list)
+    linear_url: str | None = None
+    jira_url: str | None = None
+    team_roles: dict[str, str] = Field(default_factory=dict)
 
 
 class WorkspaceConfig(WorkspaceCreateRequest):
@@ -64,6 +80,8 @@ class RunState(BaseModel):
     status: RunStatus = RunStatus.PENDING
     current_stage: str | None = None
     retry_count: int = 0
+    approval_approved: bool | None = None
+    approval_state: dict[str, str] = Field(default_factory=dict)
     selected_feature: dict[str, Any] | None = None
     selected_feature_index: int | None = None
     top_features: list[dict[str, Any]] = Field(default_factory=list)
@@ -81,6 +99,7 @@ class RunCreateRequest(BaseModel):
     goal_statement: str | None = None
     fast_mode: bool = True
     selected_feature_index: int | None = Field(default=None, ge=0, le=2)
+    design_system_tokens: str | None = None
 
 
 class RunFeatureSelectRequest(BaseModel):
@@ -94,6 +113,7 @@ class RunSummary(BaseModel):
     retry_count: int
     outputs_index: dict[str, str | None]
     summary: dict[str, Any] | None = None
+    approval_state: dict[str, str] | None = None
 
 
 class ApiError(BaseModel):

@@ -2,14 +2,67 @@
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import tempfile
-import os
 from pathlib import Path
+
+
+def _sanitize_patch(diff: str) -> str:
+    """Normalize patch format for git apply / patch compatibility."""
+    text = diff.strip()
+    if not text:
+        return text
+    # Strip markdown code fences
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    # Normalize line endings
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Fix "diff --git" appearing mid-line (missing newline before next file)
+    text = re.sub(r"([^\n])(diff --git )", r"\1\n\2", text)
+    # Ensure each "diff --git" block is properly separated (blank line before each except first)
+    parts = text.split("\ndiff --git ")
+    if len(parts) > 1:
+        rebuilt = [parts[0].rstrip()]
+        for p in parts[1:]:
+            block = "diff --git " + p
+            if not block.endswith("\n"):
+                block += "\n"
+            rebuilt.append(block.rstrip())
+        text = "\n\n".join(rebuilt)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    # Drop diff blocks for binary files (png, etc.) - text patches can't create binaries
+    _BINARY_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".woff", ".woff2", ".ttf", ".eot"})
+    parts = text.split("\ndiff --git ")
+    kept: list[str] = []
+    for i, p in enumerate(parts):
+        block = p if i == 0 else "diff --git " + p
+        block = block.rstrip()
+        if not block:
+            continue
+        first_line = block.split("\n")[0]
+        match = re.search(r"diff --git a/(\S+) b/\S+", first_line)
+        if match:
+            path = match.group(1)
+            if any(path.lower().endswith(ext) for ext in _BINARY_EXT):
+                continue
+        kept.append(block)
+    text = "\n\n".join(kept) if len(kept) > 1 else (kept[0] + "\n" if kept else "")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text
 
 
 def apply_patch(diff: str, target_dir: Path, forbidden_paths: list[str]) -> dict[str, object]:
     """Apply a unified diff using system git apply command."""
+    diff = _sanitize_patch(diff)
     # check forbidden paths
     for forbidden in forbidden_paths:
         normalized = forbidden.lstrip("/").strip()

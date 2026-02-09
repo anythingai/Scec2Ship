@@ -1,10 +1,16 @@
+import os
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
 
 
+@pytest.mark.skipif(
+    not os.getenv("GEMINI_API_KEY"),
+    reason="GEMINI_API_KEY required for full pipeline (integration test)",
+)
 def test_api_run_flow_smoke() -> None:
     client = TestClient(app)
 
@@ -24,7 +30,7 @@ def test_api_run_flow_smoke() -> None:
     assert run.status_code == 200
     run_id = run.json()["run_id"]
 
-    deadline = time.time() + 30
+    deadline = time.time() + 180
     status = "pending"
     while time.time() < deadline:
         resp = client.get(f"/runs/{run_id}")

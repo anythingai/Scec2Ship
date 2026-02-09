@@ -1,6 +1,6 @@
 export type StageStatus = "pending" | "running" | "done" | "failed" | "retry" | "skipped"
 
-export type RunStatus = "idle" | "pending" | "running" | "retrying" | "completed" | "failed" | "cancelled"
+export type RunStatus = "idle" | "pending" | "running" | "awaiting_approval" | "retrying" | "completed" | "failed" | "cancelled"
 
 export interface Stage {
   id: string
@@ -35,12 +35,22 @@ export interface Guardrails {
   forbiddenPaths: string[]
 }
 
+export interface OKRConfig {
+  okrs: string[]
+  northStarMetric?: string | null
+}
+
 export interface Workspace {
   teamName: string
   repoUrl: string
   branch: string
   goalStatement: string
   guardrails: Guardrails
+  okrConfig?: OKRConfig | null
+  approvalWorkflowEnabled?: boolean
+  approvers?: string[]
+  linearUrl?: string | null
+  jiraUrl?: string | null
   workspaceId?: string | null
 }
 
@@ -76,6 +86,8 @@ export interface FeatureChoice {
   feature: string
   rationale: string
   linked_claim_ids: string[]
+  okr_alignment_score?: number
+  rejection_reason?: string
 }
 
 export interface EvidenceMap {
@@ -97,6 +109,9 @@ export interface RunSummary {
   testsSkipped: number
   duration: string
   prUrl?: string | null
+  okrAlignmentScore?: number | null
+  impactProjection?: string | null
+  impactConfidenceInterval?: string | null
 }
 
 export interface RunHistoryItem {
@@ -119,11 +134,18 @@ export interface RunState {
   retryCount: number
   artifacts: {
     prd: string | null
+    wireframes: string | null
+    userFlow: string | null
     tickets: Ticket[] | null
     ticketsEpicTitle: string | null
     evidenceMap: EvidenceMap | null
     diff: string | null
     testReport: string | null
+    auditTrail: Record<string, unknown> | null
+    deviationAlert: { run_id: string; message: string; detected_at: string } | null
+    decisionMemo: string | null
+    goToMarket: string | null
+    analyticsSpec: string | null
   }
   workspace: Workspace
   evidenceFiles: EvidenceFile[]
@@ -132,6 +154,7 @@ export interface RunState {
   selectedFeatureIndex: number | null
   topFeatures: FeatureChoice[]
   showFeatureSelection: boolean
+  designSystemTokens: string
   summary: RunSummary | null
   showCitations: boolean
   failureMessage: string | null
@@ -144,6 +167,8 @@ export const PIPELINE_STAGES: Omit<Stage, "status">[] = [
   { id: "SYNTHESIZE", label: "Synthesize", description: "Cluster evidence & rank themes" },
   { id: "SELECT_FEATURE", label: "Select Feature", description: "Choose highest-impact feature" },
   { id: "GENERATE_PRD", label: "Generate PRD", description: "Produce PRD with acceptance criteria" },
+  { id: "GENERATE_DESIGN", label: "Generate Design", description: "Wireframes & user flow diagrams" },
+  { id: "AWAITING_APPROVAL", label: "Awaiting Approval", description: "Stakeholder review of PRD & design" },
   { id: "GENERATE_TICKETS", label: "Generate Tickets", description: "Create structured tickets" },
   { id: "IMPLEMENT", label: "Implement", description: "Generate code patch" },
   { id: "VERIFY", label: "Verify", description: "Run tests & lint checks" },

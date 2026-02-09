@@ -4,6 +4,21 @@ A verification-first product execution agent that converts scattered product evi
 
 ---
 
+## Quick Start (One Command)
+
+```bash
+# Prerequisites: Python 3.11+, Node.js 18+, Git
+git clone <repo-url> && cd Scec2Ship
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r apps/api/requirements.txt
+cd apps/web && npm install && cd ../..
+make run
+```
+
+Then open **http://localhost:3000**. Load sample evidence, create a workspace, and run the pipeline.
+
+---
+
 ## What It Is
 
 Growpad is "Cursor for shipping decisions"—except it outputs a PR that passes tests and explains why.
@@ -76,11 +91,14 @@ Result: Converts weeks of synthesis + coordination into a verified execution pip
 | Artifact            | Format       | Description                                                                                                     |
 | ------------------- | ------------ | --------------------------------------------------------------------------------------------------------------- |
 | `PRD.md`            | Markdown     | Product requirements with Overview, Problem, Solution, Acceptance Criteria, Constraints                         |
+| `wireframes.html`   | HTML         | UI wireframes for engineering reference                                                                         |
+| `user-flow.mmd`     | Mermaid      | User journey visualization                                                                                      |
 | `tickets.json`      | JSON         | Structured tickets with id, title, description, acceptance_criteria, files_expected, risk_level, estimate_hours |
 | `evidence-map.json` | JSON         | Claims linked to source snippets with confidence and rationale; Top 3 candidate features                        |
 | `diff.patch`        | Unified diff | Code changes applied (or PR URL if GitHub mode)                                                                 |
 | `test-report.md`    | Markdown     | Test execution output with raw logs + PASS/FAIL summary                                                         |
 | `run-log.jsonl`     | JSONL        | Complete execution log with timestamps, stage transitions, tool calls, latency                                  |
+| `audit-trail.json`  | JSON         | "Why did we build this?" decision history                                                                       |
 
 **Plus:**
 
@@ -100,7 +118,9 @@ Result: Converts weeks of synthesis + coordination into a verified execution pip
 | 1     | `SYNTHESIZE`       | Cluster evidence, rank themes, generate top 3 candidate features | Evidence                    | Top 3 features + rationale + evidence map |
 | 2     | `SELECT_FEATURE`   | User selects feature (or auto-pick in fast mode)                 | Top 3 features              | Selected feature                          |
 | 3     | `GENERATE_PRD`     | Produce PRD with acceptance criteria                             | Selected feature + evidence | `PRD.md`                                  |
-| 4     | `GENERATE_TICKETS` | Produce structured tickets with owners and estimates             | PRD                         | `tickets.json`                            |
+| 3.5   | `GENERATE_DESIGN`  | Generate wireframes and user flow diagrams                       | PRD + design tokens         | `wireframes.html`, `user-flow.mmd`       |
+| 3.6   | `AWAITING_APPROVAL`| (Optional) Stakeholder review of PRD + design                     | PRD + wireframes            | Approval/rejection + comments             |
+| 4     | `GENERATE_TICKETS` | Produce structured tickets with owners and estimates             | PRD + design                | `tickets.json`                            |
 | 5     | `IMPLEMENT`        | Generate implementation plan, apply diff, create PR              | Tickets + repo context      | `diff.patch` or PR                        |
 | 6     | `VERIFY`           | Run tests/lint/typecheck in CI-like runner                       | Patch + repo                | Test stdout/stderr, exit code             |
 | 7     | `SELF_HEAL`        | On verify fail: generate correction patch                        | Failure log + diff          | New patch                                 |
@@ -158,11 +178,11 @@ START → INTAKE → SYNTHESIZE → SELECT_FEATURE → GENERATE_PRD → GENERATE
 
 ### User Experience (3-Panel UI)
 
-| Panel         | Description                                                                       |
-| ------------- | --------------------------------------------------------------------------------- | ------- | ------------ | ---- | ----------- | ------------ |
-| **Input**     | Evidence upload, GitHub connect, guardrails configuration, "Load sample" button   |
-| **Timeline**  | Stage list with status badges, streaming log lines, retry counter (0/2, 1/2, 2/2) |
-| **Artifacts** | Tabs: PRD                                                                         | Tickets | Evidence Map | Diff | Test Report | Download Zip |
+| Panel         | Description                                                                                |
+| ------------- | ------------------------------------------------------------------------------------------ |
+| **Input**     | Evidence upload, GitHub connect, guardrails configuration, OKR config, "Load sample" button |
+| **Timeline**  | Stage list with status badges, streaming log lines, retry counter (0/2, 1/2, 2/2)            |
+| **Artifacts** | Tabs: PRD, Wireframes, User Flow, Tickets, Evidence Map, Diff, Tests, Audit Trail, Download Zip |
 
 **Trust-Building Features:**
 
@@ -209,11 +229,14 @@ data/                # Runtime data (gitignored)
 Per run (`data/runs/<run_id>/artifacts/`):
 
 - `PRD.md`
+- `wireframes.html`
+- `user-flow.mmd`
 - `tickets.json`
 - `evidence-map.json`
 - `diff.patch` (or PR reference)
 - `test-report.md`
 - `run-log.jsonl`
+- `audit-trail.json`
 
 ---
 
@@ -279,9 +302,9 @@ Per run (`data/runs/<run_id>/artifacts/`):
 ### Optional Gemini Runtime Configuration
 
 - Set `GEMINI_API_KEY` to enable live Gemini 3 generation in SYNTHESIZE/PRD/TICKETS/SELF_HEAL stages.
-- Optionally set `GEMINI_MODEL` (default: `gemini-3.0-flash`).
-  - Use `gemini-3.0-flash` for speed and efficiency
-  - Use `gemini-3.0-pro` for complex reasoning tasks
+- Optionally set `GEMINI_MODEL` (default: `gemini-3-pro-preview`).
+  - Use `gemini-3-pro-preview` for complex reasoning (recommended)
+  - Use `gemini-3-flash-preview` for speed and efficiency
 - If key/model are unavailable or calls fail, Growpad automatically uses deterministic local fallbacks.
 
 ### Gemini 3 Usage Points
@@ -291,9 +314,11 @@ Per run (`data/runs/<run_id>/artifacts/`):
 | **Synthesize**       | Evidence clustering and feature selection     | Interviews, tickets, metrics | Top 3 features + evidence-map |
 | **Select Feature**   | Feature ranking validation (if user override) | Top 3 features               | Selected feature              |
 | **Generate PRD**     | PRD authoring                                 | Feature + evidence           | `PRD.md`                      |
-| **Generate Tickets** | Ticket breakdown                              | PRD                          | `tickets.json`                |
+| **Generate Design**  | Wireframes and user flow                      | PRD + design tokens          | `wireframes.html`, `user-flow.mmd` |
+| **Generate Tickets** | Ticket breakdown                              | PRD + design                 | `tickets.json`                |
 | **Implement**        | Code generation                               | Tickets + repo context       | Unified diff                  |
 | **Verify (Auditor)** | Failure analysis and fix                      | Failure log + diff           | Correction patch              |
+| **Agent Handoff**    | Context file generation                        | PRD + tickets                | `.cursorrules`, `.windsurfrules` |
 
 All generation stages use Gemini 3 API. Without Gemini 3, the system falls back to deterministic templates.
 
@@ -301,7 +326,7 @@ Example:
 
 ```bash
 export GEMINI_API_KEY="your_key_here"
-export GEMINI_MODEL="gemini-3.0-flash"
+export GEMINI_MODEL="gemini-3-pro-preview"
 ```
 
 ### GitHub Connect API (Workspace Token Binding)
@@ -321,8 +346,9 @@ export GEMINI_MODEL="gemini-3.0-flash"
 
 ### Developer shortcuts
 
-- `make run` — start FastAPI backend on `http://127.0.0.1:8000`
-- `make test` — run test suite
+- `make run` — start both backend and frontend
+- `make test` — run backend tests
+- `make check` — run tests, lint, typecheck, and build (CI verification)
 - `make clean-runtime` — clear generated runtime folders (`runs/*`, `workspaces/*`)
 
 ### Docker Deployment
@@ -333,7 +359,7 @@ To run the full stack using Docker Compose:
 
    ```bash
    GEMINI_API_KEY=your_key_here
-   GEMINI_MODEL=gemini-3.0-flash
+   GEMINI_MODEL=gemini-3-pro-preview
    ```
 
 2. Build and start services:
@@ -411,6 +437,7 @@ This repository now contains a working production-style MVP aligned to the PRD/d
 - **Requirements:** New application, Gemini 3 API, public demo, public repo, ~3-minute video
 - **Judging Criteria:** Technical Execution (40%), Impact (20%), Innovation (30%), Presentation (10%)
 - **Details:** [gemini3.devpost.com](https://gemini3.devpost.com/)
+- **Devpost Write-Up:** See [DEVPOST.md](DEVPOST.md) for the ~200-word Gemini 3 integration description
 
 ---
 

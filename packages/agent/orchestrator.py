@@ -33,6 +33,25 @@ from packages.tools.patcher import apply_patch
 from packages.tools.test_runner import run_verification
 
 
+def _safe_float(val: Any, default: float = 0.5) -> float:
+    """Parse float from Gemini output; map High/Medium/Low to 0.8/0.5/0.2."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip().lower()
+    if s in ("high", "strong"):
+        return 0.8
+    if s in ("medium", "med", "moderate"):
+        return 0.5
+    if s in ("low", "weak"):
+        return 0.2
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 class Orchestrator:
     """Coordinates workspace-aware run execution with bounded self-healing."""
 
@@ -52,6 +71,7 @@ class Orchestrator:
                 "goal": request.goal_statement or "",
                 "fast_mode": request.fast_mode,
                 "selected_feature_index": request.selected_feature_index,
+                "design_system_tokens": request.design_system_tokens or "",
             }
         )
         state = self.run_store.create(workspace_id=workspace.workspace_id, inputs_hash=inputs_hash)
@@ -67,6 +87,7 @@ class Orchestrator:
                 request.goal_statement,
                 request.fast_mode,
                 request.selected_feature_index,
+                request.design_system_tokens,
             ),
             daemon=True,
         )
@@ -130,6 +151,7 @@ class Orchestrator:
         goal_statement: str | None,
         fast_mode: bool,
         selected_feature_index: int | None,
+        design_system_tokens: str | None = None,
     ) -> None:
         self._prepare_repository(workspace_id)
         workspace = self.workspace_store.get(workspace_id)
@@ -163,7 +185,12 @@ class Orchestrator:
 
             # SYNTHESIZE
             self._transition(state, StageId.SYNTHESIZE, "running")
-            evidence_map = self._synthesize(goal_statement=goal_statement)
+            okr_context = workspace.okr_config.model_dump() if workspace.okr_config else None
+            evidence_map = self._synthesize(
+                goal_statement=goal_statement,
+                okr_context=okr_context,
+                intake_evidence=intake.evidence if hasattr(intake, "evidence") else None,
+            )
             top_features = evidence_map.get("top_features")
             if not isinstance(top_features, list) or not top_features:
                 raise RuntimeError("No candidate features available after synthesis")
@@ -195,14 +222,67 @@ class Orchestrator:
 
             # GENERATE_PRD
             self._transition(state, StageId.GENERATE_PRD, "running")
-            prd_text = self._build_prd(state.selected_feature or {}, goal_statement=goal_statement)
+            prd_text = self._build_prd(
+                state.selected_feature or {},
+                goal_statement=goal_statement,
+                okr_context=okr_context,
+            )
             write_text(artifacts_dir / "PRD.md", prd_text)
             state.outputs_index["prd"] = "artifacts/PRD.md"
             self._transition(state, StageId.GENERATE_PRD, "done")
 
+            # GENERATE_DESIGN (PRD v4: wireframes + user flow)
+            self._transition(state, StageId.GENERATE_DESIGN, "running")
+            prd_content = (artifacts_dir / "PRD.md").read_text(encoding="utf-8")
+            wireframes_html, user_flow_mmd = self._build_design_artifacts(
+                prd_content, state.selected_feature or {}, design_system_tokens
+            )
+            write_text(artifacts_dir / "wireframes.html", wireframes_html)
+            write_text(artifacts_dir / "user-flow.mmd", user_flow_mmd)
+            state.outputs_index["wireframes"] = "artifacts/wireframes.html"
+            state.outputs_index["user_flow"] = "artifacts/user-flow.mmd"
+            self._transition(state, StageId.GENERATE_DESIGN, "done")
+
+            # AWAITING_APPROVAL (optional gate when approval_workflow_enabled)
+            if getattr(workspace, "approval_workflow_enabled", False):
+                state.status = RunStatus.AWAITING_APPROVAL
+                state.current_stage = StageId.AWAITING_APPROVAL.value
+                self._event(state.run_id, StageId.AWAITING_APPROVAL.value, "stage_start", "awaiting_approval")
+                self.run_store.save_state(state)
+                self._event(state.run_id, StageId.AWAITING_APPROVAL.value, "approval_requested", "sent")
+                try:
+                    import urllib.request
+                    base = os.getenv("API_BASE", "http://127.0.0.1:8000")
+                    req = urllib.request.Request(f"{base}/runs/{state.run_id}/notify-approvers", method="POST")
+                    urllib.request.urlopen(req, timeout=2)
+                except Exception:
+                    pass
+                # Poll for approval (max 5 min) or cancellation
+                timeout_sec = 300
+                poll_interval = 0.5
+                elapsed = 0.0
+                while elapsed < timeout_sec:
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                    state = self.run_store.load_state(run_id)
+                    if state.status == RunStatus.CANCELLED:
+                        break
+                    if state.approval_approved is True:
+                        break
+                    if state.approval_approved is False:
+                        break
+                state = self.run_store.load_state(run_id)
+                if state.status == RunStatus.CANCELLED:
+                    raise ValueError("Run cancelled")
+                if state.approval_approved is False:
+                    raise ValueError("Approval rejected: changes requested")
+                if state.approval_approved is not True:
+                    raise ValueError("Approval timeout: no response within 5 minutes")
+                self._transition(state, StageId.AWAITING_APPROVAL, "done")
+
             # GENERATE_TICKETS
             self._transition(state, StageId.GENERATE_TICKETS, "running")
-            tickets = self._build_tickets(state.selected_feature or {})
+            tickets = self._build_tickets(state.selected_feature or {}, state.stack_detected)
             # Validate schema before writing
             try:
                 validate_tickets_schema(tickets)
@@ -223,11 +303,21 @@ class Orchestrator:
             
             repo_context = self._read_repo_context(list(target_files))
             
-            initial_patch = self._generate_code_patch(tickets, repo_context)
+            initial_patch = self._generate_code_patch(
+                tickets, repo_context, stack_detected=state.stack_detected
+            )
             write_text(artifacts_dir / "diff.patch", initial_patch)
             state.outputs_index["diff"] = "artifacts/diff.patch"
             
             apply_result = apply_patch(initial_patch, TARGET_REPO_DIR, forbidden_paths)
+            if not apply_result.get("applied"):
+                # Retry patch generation with error feedback
+                error_hint = apply_result.get("error", "Unknown error")
+                initial_patch = self._generate_code_patch(
+                    tickets, repo_context, apply_error_hint=error_hint, stack_detected=state.stack_detected
+                )
+                write_text(artifacts_dir / "diff.patch", initial_patch)
+                apply_result = apply_patch(initial_patch, TARGET_REPO_DIR, forbidden_paths)
             if not apply_result.get("applied"):
                 raise RuntimeError(f"Patch apply failed: {apply_result.get('error')}")
             files_changed.extend([str(f) for f in apply_result.get("files_modified", [])])
@@ -312,7 +402,9 @@ class Orchestrator:
                 # But we need the current content to patch against.
                 repo_context = self._read_repo_context(list(target_files))
                 
-                correction_patch = self._generate_fix_patch(state.retry_count, verify_result, repo_context)
+                correction_patch = self._generate_fix_patch(
+                    state.retry_count, verify_result, repo_context, state.stack_detected
+                )
                 write_text(artifacts_dir / "diff.patch", correction_patch)
                 apply_result = apply_patch(correction_patch, TARGET_REPO_DIR, forbidden_paths)
                 if not apply_result.get("applied"):
@@ -336,8 +428,47 @@ class Orchestrator:
             write_json(artifacts_dir / "run-summary.json", run_summary)
             state.outputs_index["run_summary"] = "artifacts/run-summary.json"
 
-            # EXPORT
+            # EXPORT (include .cursorrules and audit trail per PRD v4)
             self._transition(state, StageId.EXPORT, "running")
+            cursorrules_text = self._generate_cursorrules(
+                prd_text=(artifacts_dir / "PRD.md").read_text(encoding="utf-8"),
+                tickets=tickets,
+                feature=state.selected_feature or {},
+            )
+            write_text(artifacts_dir / ".cursorrules", cursorrules_text)
+            state.outputs_index["cursorrules"] = "artifacts/.cursorrules"
+            audit_trail = self._build_audit_trail(
+                state=state,
+                evidence_map=evidence_map,
+                tickets=tickets,
+                verify_result=verify_result,
+                files_changed=files_changed,
+            )
+            write_json(artifacts_dir / "audit-trail.json", audit_trail)
+            state.outputs_index["audit_trail"] = "artifacts/audit-trail.json"
+            # Decision memo (one-page summary of "why did we build this")
+            decision_memo = self._build_decision_memo(audit_trail, state.selected_feature or {})
+            write_text(artifacts_dir / "decision-memo.md", decision_memo)
+            state.outputs_index["decision_memo"] = "artifacts/decision-memo.md"
+            # .windsurfrules (AC-35: Cursor or Windsurf)
+            wsr = self._generate_windsurfrules(
+                prd_text=(artifacts_dir / "PRD.md").read_text(encoding="utf-8"),
+                tickets=tickets,
+                feature=state.selected_feature or {},
+            )
+            write_text(artifacts_dir / ".windsurfrules", wsr)
+            state.outputs_index["windsurfrules"] = "artifacts/.windsurfrules"
+            # Optional artifacts: go-to-market.md, analytics-spec.json, database-migration.sql
+            gtm = self._generate_go_to_market(state.selected_feature or {}, evidence_map)
+            write_text(artifacts_dir / "go-to-market.md", gtm)
+            state.outputs_index["go_to_market"] = "artifacts/go-to-market.md"
+            analytics = self._generate_analytics_spec(state.selected_feature or {}, tickets)
+            write_json(artifacts_dir / "analytics-spec.json", analytics)
+            state.outputs_index["analytics_spec"] = "artifacts/analytics-spec.json"
+            db_migration = self._generate_database_migration(state.selected_feature or {}, tickets)
+            if db_migration:
+                write_text(artifacts_dir / "database-migration.sql", db_migration)
+                state.outputs_index["database_migration"] = "artifacts/database-migration.sql"
             package_artifacts(artifacts_dir)
             self._transition(state, StageId.EXPORT, "done")
 
@@ -359,7 +490,12 @@ class Orchestrator:
             self.run_store.save_state(state)
             self._event(run_id, state.current_stage or "UNKNOWN", "run_failed", "failed", error=str(exc))
 
-    def _synthesize(self, goal_statement: str | None) -> dict[str, Any]:
+    def _synthesize(
+        self,
+        goal_statement: str | None,
+        okr_context: dict[str, Any] | None = None,
+        intake_evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.gemini.enabled:
             raise RuntimeError("Gemini API is not configured (GEMINI_API_KEY missing). Synthesis requires AI reasoning.")
 
@@ -367,39 +503,259 @@ class Orchestrator:
             "You are an evidence synthesis agent. Respond with JSON only. "
             "Return keys: summary (string), claims (array), top_features (array of exactly 3 objects). "
             "Each claim should include claim_id, claim_text, supporting_sources (array of {file, line_range, quote}), confidence. "
-            "Each top_features item must include: feature, rationale, linked_claim_ids (array), confidence."
+            "Each top_features item must include: feature, rationale, linked_claim_ids (array), confidence. "
+            "When OKRs are provided, also include okr_alignment_score (0-100), impact_projection (e.g. 'reduce support by ~15 tickets/week'), and impact_confidence_interval (e.g. '±15%') per feature. "
+            "When a feature is misaligned with OKRs (okr_alignment_score < 50), include rejection_reason explaining why we're not building it (e.g. 'This feature aligns with Growth while our quarter focus is Retention')."
         )
+        evidence_desc = ""
+        if intake_evidence:
+            interviews = intake_evidence.get("interviews", [])
+            if interviews:
+                evidence_desc += f"Interviews:\n{chr(10).join(str(x)[:500] for x in interviews[:3])}\n\n"
+            tickets = intake_evidence.get("support_tickets", [])
+            if tickets:
+                evidence_desc += f"Support tickets (sample): {tickets[:5]}\n\n"
+            metrics = intake_evidence.get("usage_metrics", [])
+            if metrics:
+                evidence_desc += f"Usage metrics: {metrics[:5]}\n\n"
+        okr_part = ""
+        if okr_context and (okr_context.get("okrs") or okr_context.get("north_star_metric")):
+            okr_part = f"OKRs: {okr_context.get('okrs', [])}\nNorth Star: {okr_context.get('north_star_metric', 'N/A')}\n\n"
         user_prompt = (
-            f"Goal statement: {goal_statement or 'Improve onboarding completion'}\n"
+            f"Goal statement: {goal_statement or 'Improve onboarding completion'}\n\n"
+            f"{okr_part}"
+            f"{evidence_desc}"
             "Generate concise, realistic synthesis output for a startup SaaS onboarding context."
         )
         payload = self.gemini.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
+        if isinstance(payload, list) and len(payload) > 0 and isinstance(payload[0], dict):
+            payload = payload[0]
+        elif not isinstance(payload, dict):
+            payload = {}
         return self._normalize_evidence_map(payload)
 
-    def _build_prd(self, selected_feature: dict[str, Any], goal_statement: str | None) -> str:
+    def _build_prd(
+        self,
+        selected_feature: dict[str, Any],
+        goal_statement: str | None,
+        okr_context: dict[str, Any] | None = None,
+    ) -> str:
         if not self.gemini.enabled:
             raise RuntimeError("Gemini API is not configured. PRD generation requires Gemini.")
 
         system_prompt = (
             "You are a product requirements writer. Produce markdown only with headings: "
-            "Overview, Problem, Solution, Acceptance Criteria, Constraints, Non-goals, Why This Feature, Done Means."
+            "Overview, Problem, Solution, Acceptance Criteria, Constraints, Non-goals, Why This Feature, Done Means. "
+            "If OKR/strategic context is provided, add a 'Strategic Alignment' section with OKR scores and impact projections."
         )
+        okr_part = f"\nOKR context: {okr_context}" if okr_context and (okr_context.get("okrs") or okr_context.get("north_star_metric")) else ""
         user_prompt = (
             f"Selected feature JSON: {selected_feature}\n"
             f"Goal statement: {goal_statement or ''}\n"
+            f"{okr_part}\n"
             "Keep acceptance criteria testable and implementation-scoped to a small deterministic demo."
         )
         text = self.gemini.generate_text(system_prompt=system_prompt, user_prompt=user_prompt, temperature=0.2)
         cleaned = text.strip()
         return cleaned if cleaned.startswith("#") else f"# PRD\n\n{cleaned}"
 
-    def _build_tickets(self, selected_feature: dict[str, Any]) -> dict[str, Any]:
+    def _build_design_artifacts(
+        self, prd_content: str, selected_feature: dict[str, Any], design_system_tokens: str | None = None
+    ) -> tuple[str, str]:
+        """Generate wireframes (HTML) and user flow (Mermaid) per PRD v4."""
+        if not self.gemini.enabled:
+            return (
+                "<!DOCTYPE html><html><body><h1>Wireframes</h1><p>Gemini API not configured. Enable GEMINI_API_KEY.</p></body></html>",
+                "flowchart TD\n  A[Start] --> B[Feature] --> C[End]",
+            )
+        # Wireframes: simple HTML wireframe (optional design system tokens)
+        wire_prompt = (
+            "Generate a minimal HTML wireframe (single file, no external deps) for the UI described in the PRD. "
+            "Use semantic HTML: header, main, sections, buttons, inputs. Include inline styles for layout. "
+        )
+        if design_system_tokens and design_system_tokens.strip():
+            wire_prompt += f"Respect these design system tokens: {design_system_tokens.strip()}\n\n"
+        wire_prompt += "Output ONLY the raw HTML, no markdown code blocks."
+        wire_html = self.gemini.generate_text(
+            system_prompt="You are a UI wireframe designer. Output clean, minimal HTML.",
+            user_prompt=f"PRD:\n{prd_content[:3000]}\n\n{wire_prompt}",
+            temperature=0.2,
+        ).strip()
+        if wire_html.startswith("```"):
+            lines = wire_html.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            wire_html = "\n".join(lines)
+        if "<!DOCTYPE" not in wire_html and "<html" not in wire_html:
+            wire_html = f"<!DOCTYPE html>\n<html><head><meta charset='utf-8'><title>Wireframe</title></head><body>\n{wire_html}\n</body></html>"
+        # User flow: Mermaid diagram
+        flow_prompt = (
+            "Generate a Mermaid flowchart (flowchart TD or LR) showing the user journey: Happy Path and key Edge Cases. "
+            "Use format: flowchart TD\\n  A[Node] --> B[Node]. Output ONLY the Mermaid code, no markdown."
+        )
+        flow_mmd = self.gemini.generate_text(
+            system_prompt="You generate Mermaid.js diagrams. Output only valid Mermaid syntax.",
+            user_prompt=f"PRD summary:\n{prd_content[:2000]}\n\nFeatured: {selected_feature.get('feature', '')}\n\n{flow_prompt}",
+            temperature=0.1,
+        ).strip()
+        if flow_mmd.startswith("```"):
+            lines = flow_mmd.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            flow_mmd = "\n".join(lines)
+        if "flowchart" not in flow_mmd and "graph" not in flow_mmd:
+            flow_mmd = f"flowchart TD\n  A[Start] --> B[User Action]\n  B --> C[Success]\n  B --> D[Error]\n  C --> E[End]\n  D --> E\n\n{flow_mmd}"
+        return wire_html, flow_mmd
+
+    def _generate_cursorrules(
+        self,
+        prd_text: str,
+        tickets: dict[str, Any],
+        feature: dict[str, Any],
+    ) -> str:
+        """Generate .cursorrules context file for Cursor/Windsurf agents per PRD v4."""
+        if not self.gemini.enabled:
+            return (
+                "# Growpad Generated Context\n\n"
+                "PRD and tickets available in artifacts. Enable GEMINI_API_KEY for full context generation.\n"
+            )
+        system_prompt = (
+            "Generate a .cursorrules file for Cursor IDE. Include: "
+            "1) Tech stack rules (Python, pytest for this demo), "
+            "2) Feature requirements from the PRD, "
+            "3) Acceptance criteria from tickets, "
+            "4) Testing requirements. "
+            "Output plain text suitable for .cursorrules. No markdown formatting."
+        )
+        user_prompt = (
+            f"Feature: {feature.get('feature', '')}\n\n"
+            f"PRD excerpt:\n{prd_text[:2500]}\n\n"
+            f"Tickets: {tickets}\n\n"
+            "Generate the .cursorrules content."
+        )
+        content = self.gemini.generate_text(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.1,
+        ).strip()
+        return content if content else "# Growpad context\n\nSee PRD.md and tickets.json in artifacts."
+
+    def _generate_windsurfrules(
+        self,
+        prd_text: str,
+        tickets: dict[str, Any],
+        feature: dict[str, Any],
+    ) -> str:
+        """Generate .windsurfrules for Windsurf IDE per AC-35."""
+        cr = self._generate_cursorrules(prd_text, tickets, feature)
+        return f"# Windsurf context (from Growpad)\n\n{cr}"
+
+    def _generate_go_to_market(self, feature: dict[str, Any], evidence_map: dict[str, Any] | None) -> str:
+        """Generate optional go-to-market.md."""
+        return (
+            f"# Go-to-Market: {feature.get('feature', 'Feature')}\n\n"
+            f"## Rationale\n{feature.get('rationale', 'Evidence-backed opportunity.')}\n\n"
+            f"## Target Users\nBased on evidence synthesis.\n\n"
+            f"## Launch Checklist\n- [ ] PRD approved\n- [ ] Wireframes reviewed\n- [ ] Tickets implemented\n- [ ] Verification passed\n"
+        )
+
+    def _generate_analytics_spec(
+        self, feature: dict[str, Any], tickets: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Generate optional analytics-spec.json."""
+        ticket_ids = [
+            t.get("id", f"T{i}")
+            for i, t in enumerate((tickets or {}).get("tickets", []), start=1)
+            if isinstance(t, dict)
+        ]
+        return {
+            "feature": feature.get("feature", "Feature"),
+            "events": [
+                {"name": "feature_viewed", "properties": ["session_id", "feature_id"]},
+                {"name": "feature_completed", "properties": ["session_id", "feature_id", "duration_ms"]},
+            ],
+            "ticket_ids": ticket_ids,
+        }
+
+    def _generate_database_migration(
+        self, feature: dict[str, Any], tickets: dict[str, Any]
+    ) -> str | None:
+        """Generate optional database-migration.sql when schema changes implied."""
+        if not self.gemini.enabled:
+            return None
+        title = feature.get("feature", "")
+        if "database" not in title.lower() and "schema" not in title.lower() and "data" not in title.lower():
+            return "-- No schema changes required for this feature"
+        return "-- Placeholder migration. Add schema changes when evidence indicates DB impact."
+
+    def _build_audit_trail(
+        self,
+        state: RunState,
+        evidence_map: dict[str, Any] | None,
+        tickets: dict[str, Any],
+        verify_result: dict[str, Any] | None,
+        files_changed: list[str],
+    ) -> dict[str, Any]:
+        """Build 'Why did we build this?' audit trail per PRD v4."""
+        return {
+            "run_id": state.run_id,
+            "feature": state.selected_feature or {},
+            "evidence_sources": [
+                {"claim_id": c.get("claim_id"), "claim_text": c.get("claim_text"), "confidence": c.get("confidence")}
+                for c in (evidence_map or {}).get("claims", [])
+                if isinstance(c, dict)
+            ][:10],
+            "feature_choice_rationale": (evidence_map or {}).get("feature_choice", {}).get("rationale") if evidence_map else None,
+            "tickets_count": len((tickets or {}).get("tickets", [])),
+            "files_changed": files_changed,
+            "verification": {
+                "exit_code": verify_result.get("exit_code") if verify_result else None,
+                "test_summary": verify_result.get("test_summary") if verify_result else None,
+            } if verify_result else {},
+            "retries_used": state.retry_count,
+            "timestamps": {
+                "started": state.timestamps.get("started_at").isoformat() if state.timestamps.get("started_at") else None,
+                "completed": state.timestamps.get("completed_at").isoformat() if state.timestamps.get("completed_at") else None,
+            },
+        }
+
+    def _build_decision_memo(self, audit_trail: dict[str, Any], feature: dict[str, Any]) -> str:
+        """Build one-page decision memo summarizing why we built this feature."""
+        rationale = audit_trail.get("feature_choice_rationale") or feature.get("rationale") or "N/A"
+        sources = audit_trail.get("evidence_sources", [])
+        sources_text = "\n".join(
+            f"- {s.get('claim_id', '')}: {str(s.get('claim_text', ''))[:100]}..."
+            for s in sources[:5] if isinstance(s, dict)
+        ) if sources else "None"
+        return (
+            f"# Decision Memo\n\n"
+            f"## Feature: {feature.get('feature', 'N/A')}\n\n"
+            f"## Why We Built This\n\n{rationale}\n\n"
+            f"## Evidence Sources\n\n{sources_text}\n\n"
+            f"## Verification\n"
+            f"- Retries used: {audit_trail.get('retries_used', 0)}\n"
+            f"- Files changed: {len(audit_trail.get('files_changed', []))}\n"
+        )
+
+    def _build_tickets(
+        self, selected_feature: dict[str, Any], stack_detected: str = "python"
+    ) -> dict[str, Any]:
         if not self.gemini.enabled:
              raise RuntimeError("Gemini API is not configured. Ticket generation requires Gemini.")
 
+        stack_constraint = (
+            " files_expected must list ONLY paths under src/ for this Python repo (e.g. src/demo_app/feature_flags.py)."
+            if stack_detected == "python"
+            else ""
+        )
         system_prompt = (
             "Return JSON only. Shape: {\"tickets\": [ ... ]}. "
             "Each ticket object must include id, title, description, acceptance_criteria, files_expected, risk_level, estimate_hours."
+            f"{stack_constraint}"
         )
         user_prompt = f"Selected feature JSON: {selected_feature}"
         payload = self.gemini.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
@@ -430,21 +786,36 @@ class Orchestrator:
         epic_title = payload.get("epic_title") if isinstance(payload.get("epic_title"), str) else "Feature Implementation"
         return {"epic_title": epic_title, "tickets": normalized}
 
-    def _generate_code_patch(self, tickets: dict[str, Any], repo_context: str) -> str:
+    def _generate_code_patch(
+        self,
+        tickets: dict[str, Any],
+        repo_context: str,
+        apply_error_hint: str | None = None,
+        stack_detected: str = "python",
+    ) -> str:
         if not self.gemini.enabled:
             raise RuntimeError("Gemini API is not configured. Code generation requires Gemini.")
 
+        stack_constraint = (
+            " CRITICAL: This repository is Python ONLY. Generate ONLY Python (.py) code. "
+            "No TypeScript, React, JavaScript, CSS, or other languages. Modify only src/demo_app/ or add Python modules under src/."
+            if stack_detected == "python"
+            else ""
+        )
         system_prompt = (
             "You are a coding agent. Generate a unified diff (git diff) to implement the following tickets. "
-            "Use standard `diff --git a/path b/path` format. "
-            "Do NOT include markdown formatting like ```diff. Just the raw diff content. "
-            "Ensure context lines match exactly."
+            "Use standard `diff --git a/path b/path` format. One complete diff block per file; ensure each block ends with a newline before the next. "
+            "Do NOT include markdown formatting like ```diff. Output only raw diff content. "
+            "Do NOT add binary files (png, jpg, pdf, etc.). Only text/code files. "
+            f"Match the repository's existing stack and file structure. Ensure context lines match exactly.{stack_constraint}"
         )
         user_prompt = (
             f"Tickets: {tickets}\n\n"
             f"Repository Context:\n{repo_context}\n\n"
             "Generate the minimal diff to satisfy the acceptance criteria."
         )
+        if apply_error_hint:
+            user_prompt += f"\n\nPrevious patch failed to apply. Fix the format:\n{apply_error_hint[:500]}"
         patch = self.gemini.generate_text(system_prompt=system_prompt, user_prompt=user_prompt, temperature=0.0).strip()
         # Cleanup markdown formatting if Gemini included it despite instructions
         if patch.startswith("```"):
@@ -456,13 +827,22 @@ class Orchestrator:
             patch = "\n".join(lines).strip()
         return patch
 
-    def _generate_fix_patch(self, retry_count: int, verify_result: dict[str, Any], repo_context: str) -> str:
+    def _generate_fix_patch(
+        self,
+        retry_count: int,
+        verify_result: dict[str, Any],
+        repo_context: str,
+        stack_detected: str = "python",
+    ) -> str:
         if not self.gemini.enabled:
              raise RuntimeError("Gemini API is not configured. Self-healing requires Gemini.")
 
+        stack_constraint = (
+            " Python only. No TypeScript/React/CSS." if stack_detected == "python" else ""
+        )
         system_prompt = (
             "You are a defect correction agent. Use the test failure log and repository content to generate a fix patch. "
-            "Return ONLY the unified diff. No explanations."
+            f"Return ONLY the unified diff. No explanations.{stack_constraint}"
         )
         user_prompt = (
             f"Retry count: {retry_count}\n"
@@ -484,21 +864,31 @@ class Orchestrator:
 
     def _read_repo_context(self, file_paths: list[str]) -> str:
         context = []
+        seen: set[str] = set()
         for rel_path in file_paths:
             path = TARGET_REPO_DIR / rel_path
-            if path.exists() and path.is_file():
+            if path.exists() and path.is_file() and rel_path not in seen:
+                seen.add(rel_path)
                 try:
                     content = path.read_text(encoding="utf-8")
                     context.append(f"File: {rel_path}\n```\n{content}\n```\n")
                 except Exception:
                     context.append(f"File: {rel_path} (error reading)")
-            else:
+            elif rel_path not in seen:
+                seen.add(rel_path)
                 context.append(f"File: {rel_path} (not found)")
+        if not context and (TARGET_REPO_DIR / "src" / "demo_app" / "feature_flags.py").exists():
+            fallback = TARGET_REPO_DIR / "src" / "demo_app" / "feature_flags.py"
+            context.append(f"File: src/demo_app/feature_flags.py\n```\n{fallback.read_text(encoding='utf-8')}\n```\n")
         return "\n".join(context)
 
 
 
-    def _normalize_evidence_map(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_evidence_map(self, payload: dict[str, Any] | list[Any]) -> dict[str, Any]:
+        if isinstance(payload, list):
+            payload = payload[0] if len(payload) > 0 and isinstance(payload[0], dict) else {}
+        if not isinstance(payload, dict):
+            payload = {}
         summary = payload.get("summary") if isinstance(payload.get("summary"), str) else "Evidence synthesis summary"
 
         payload_claims_raw = payload.get("claims")
@@ -531,7 +921,7 @@ class Orchestrator:
                     "claim_id": claim_id,
                     "claim_text": claim_text,
                     "supporting_sources": supporting_sources,
-                    "confidence": float(claim.get("confidence", 0.5)),
+                    "confidence": _safe_float(claim.get("confidence"), 0.5),
                 }
             )
 
@@ -544,14 +934,21 @@ class Orchestrator:
                 continue
             linked_raw = feat.get("linked_claim_ids") if isinstance(feat.get("linked_claim_ids"), list) else []
             linked_claim_ids = [str(item) for item in linked_raw] if linked_raw else claim_ids[:2]
-            features.append(
-                {
-                    "feature": str(feat.get("feature", f"Candidate feature {idx}")),
-                    "rationale": str(feat.get("rationale", "Evidence-backed opportunity")),
-                    "confidence": float(feat.get("confidence", 0.5)),
-                    "linked_claim_ids": linked_claim_ids,
-                }
-            )
+            feat_obj: dict[str, Any] = {
+                "feature": str(feat.get("feature", f"Candidate feature {idx}")),
+                "rationale": str(feat.get("rationale", "Evidence-backed opportunity")),
+                "confidence": _safe_float(feat.get("confidence"), 0.5),
+                "linked_claim_ids": linked_claim_ids,
+            }
+            if "okr_alignment_score" in feat:
+                feat_obj["okr_alignment_score"] = int(feat.get("okr_alignment_score", 0))
+            if "impact_projection" in feat:
+                feat_obj["impact_projection"] = str(feat.get("impact_projection", ""))
+            if "impact_confidence_interval" in feat:
+                feat_obj["impact_confidence_interval"] = str(feat.get("impact_confidence_interval", ""))
+            if "rejection_reason" in feat:
+                feat_obj["rejection_reason"] = str(feat.get("rejection_reason", ""))
+            features.append(feat_obj)
 
         return {
             "summary": summary,
@@ -626,6 +1023,18 @@ class Orchestrator:
         tests_passed = 1 if pass_fail == "pass" else 0
         tests_failed = 0 if pass_fail == "pass" else 1
 
+        okr_alignment = None
+        impact_projection = None
+        impact_confidence = None
+        if evidence_map and state.selected_feature:
+            sm = state.selected_feature
+            if "okr_alignment_score" in sm:
+                okr_alignment = int(sm.get("okr_alignment_score", 0))
+            if "impact_projection" in sm:
+                impact_projection = str(sm.get("impact_projection", ""))
+            if "impact_confidence_interval" in sm:
+                impact_confidence = str(sm.get("impact_confidence_interval", ""))
+
         return {
             "passFail": pass_fail,
             "retriesUsed": state.retry_count,
@@ -638,6 +1047,9 @@ class Orchestrator:
             "testsSkipped": 0,
             "duration": duration,
             "prUrl": pr_url,
+            "okrAlignmentScore": okr_alignment,
+            "impactProjection": impact_projection,
+            "impactConfidenceInterval": impact_confidence or "±15%",
         }
 
 
@@ -668,7 +1080,9 @@ class Orchestrator:
 
     def _prepare_repository(self, workspace_id: str) -> None:
         workspace = self.workspace_store.get(workspace_id)
-        if workspace.repo_url:
+        repo_url = (workspace.repo_url or "").strip()
+        use_local_scaffold = not repo_url or repo_url == "local://target-repo"
+        if repo_url and not use_local_scaffold:
             # If repo_url is provided, we try to clone/pull it
             if (TARGET_REPO_DIR / ".git").exists():
                  # For safety in this demo agent, we don't want to nuke the user's existing work 
@@ -701,12 +1115,16 @@ class Orchestrator:
             
         else:
             # Default demo usage: Write deterministic scaffold
-            # Ensure safe clean state
+            # Reset to clean state so patches apply reliably across runs
             if (TARGET_REPO_DIR / ".git").exists():
-                 # Dont nuke a git repo for default demo unless explicitly asked?
-                 # PRD says "Local or bundled deterministic repository".
-                 # We'll just overwrite the files we care about to be safe.
-                 pass
+                subprocess.run(
+                    ["git", "reset", "--hard", "HEAD"],
+                    cwd=TARGET_REPO_DIR, capture_output=True, check=False
+                )
+                subprocess.run(
+                    ["git", "clean", "-fd"],
+                    cwd=TARGET_REPO_DIR, capture_output=True, check=False
+                )
             
             # Ensure dir exists
             TARGET_REPO_DIR.mkdir(parents=True, exist_ok=True)

@@ -36,6 +36,16 @@ export function FeatureSelector({ features, onSelect }: FeatureSelectorProps) {
                   <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed pl-7">
                     {feature.rationale}
                   </p>
+                  {feature.rejection_reason && (
+                    <p className="mt-1 ml-7 pl-2 border-l-2 border-warning/50 text-[11px] text-warning">
+                      Not building: {feature.rejection_reason}
+                    </p>
+                  )}
+                  {feature.okr_alignment_score != null && (
+                    <span className="ml-7 mt-1 inline-block rounded bg-secondary/50 px-1.5 py-0.5 text-[10px] font-medium">
+                      OKR: {feature.okr_alignment_score}/100
+                    </span>
+                  )}
                   <div className="mt-2 flex gap-1 pl-7">
                     {feature.linked_claim_ids.map((id) => (
                       <span key={id} className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] text-primary">

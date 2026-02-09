@@ -1,5 +1,6 @@
 """Comprehensive PRD compliance tests."""
 
+import os
 import pytest
 from pathlib import Path
 
@@ -41,8 +42,8 @@ def test_evidence_bundle_structure_compliance():
 
 def test_evidence_validation_compliance():
     """FR-1.2: Evidence validation with quality meter."""
-    evidence_dir = Path(__file__).parent.parent / "sample-data" / "evidence"
-    result = validate_evidence_bundle(evidence_dir)
+    from packages.common.paths import SAMPLE_EVIDENCE_DIR
+    result = validate_evidence_bundle(SAMPLE_EVIDENCE_DIR)
     
     # Required files present
     assert result.valid
@@ -99,12 +100,14 @@ def test_api_endpoints_exist():
 
 
 def test_stage_sequence_compliance():
-    """Section 5.1: All 9 stages implemented in correct sequence."""
+    """Section 5.1: All stages implemented in correct sequence (PRD v4)."""
     expected_stages = [
         "INTAKE",
         "SYNTHESIZE",
         "SELECT_FEATURE",
         "GENERATE_PRD",
+        "GENERATE_DESIGN",
+        "AWAITING_APPROVAL",
         "GENERATE_TICKETS",
         "IMPLEMENT",
         "VERIFY",
@@ -154,6 +157,8 @@ def test_artifact_packaging_compliance():
         
         # Create required artifacts
         (tmpdir / "PRD.md").write_text("# Test PRD")
+        (tmpdir / "wireframes.html").write_text("<!DOCTYPE html><html><body></body></html>")
+        (tmpdir / "user-flow.mmd").write_text("flowchart TD\n  A --> B")
         (tmpdir / "tickets.json").write_text('{"tickets": []}')
         (tmpdir / "evidence-map.json").write_text('{"claims": [], "top_features": []}')
         (tmpdir / "diff.patch").write_text("diff --git")
@@ -166,6 +171,8 @@ def test_artifact_packaging_compliance():
         # Verify zip contains all required artifacts
         with zipfile.ZipFile(zip_path, 'r') as zf:
             assert "PRD.md" in zf.namelist()
+            assert "wireframes.html" in zf.namelist()
+            assert "user-flow.mmd" in zf.namelist()
             assert "tickets.json" in zf.namelist()
             assert "evidence-map.json" in zf.namelist()
             assert "diff.patch" in zf.namelist()
@@ -176,10 +183,11 @@ def test_artifact_packaging_compliance():
 
 
 def test_run_status_values_compliance():
-    """Section 9.2: Run status values match specification."""
+    """Section 9.2: Run status values match specification (PRD v4)."""
     expected_statuses = [
         "pending",
         "running",
+        "awaiting_approval",
         "retrying",
         "completed",
         "failed",
@@ -192,14 +200,15 @@ def test_run_status_values_compliance():
 
 def test_security_features_compliance():
     """Section 8.3: Security features implemented."""
-    # GitHub token encryption
+    # GitHub token encryption via WorkspaceStore
     from packages.common.store import WorkspaceStore
-    import base64
+    from packages.common.models import WorkspaceCreateRequest
     
-    # Token should be encrypted (base64)
-    token = "test_token_12345"
-    encrypted = base64.b64encode(token.encode("utf-8")).decode("utf-8")
-    assert encrypted.startswith("b64:")
+    ws = WorkspaceStore()
+    workspace = ws.create(WorkspaceCreateRequest(team_name="SecTest", repo_url="local://x"))
+    workspace = ws.connect_github(workspace.workspace_id, "test_token_12345")
+    assert workspace.github_token_encrypted is not None
+    assert workspace.github_token_encrypted.startswith("b64:")
     
     # Forbidden paths check in patcher
     from packages.tools.patcher import apply_patch
@@ -207,7 +216,16 @@ def test_security_features_compliance():
     
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
-        diff = 'diff --git a/infra/config.py b/infra/config.py\n- old\n+ new'
+        # Valid unified diff that touches forbidden path
+        diff = (
+            "diff --git a/infra/config.py b/infra/config.py\n"
+            "index 0000000..1111111 100644\n"
+            "--- a/infra/config.py\n"
+            "+++ b/infra/config.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
         result = apply_patch(diff, tmpdir, forbidden_paths=["/infra"])
         assert not result.get("applied")
         assert "forbidden" in result.get("error", "").lower()
@@ -228,7 +246,7 @@ def test_gemini_client_default_model():
     
     # Without explicit model, should default to Gemini 3
     client = GeminiClient(api_key="test_key")
-    assert "gemini-3" in client.model_name or "gemini-3" in os.getenv("GEMINI_MODEL", "gemini-3.0-flash")
+    assert "gemini-3" in client.model_name or "gemini-3" in os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
 
 
 def test_sse_realtime_updates():
@@ -241,7 +259,8 @@ def test_sse_realtime_updates():
 
 def test_sample_evidence_completeness():
     """Section 6.5: Sample evidence bundle complete and realistic."""
-    evidence_dir = Path(__file__).parent.parent / "sample-data" / "evidence"
+    from packages.common.paths import SAMPLE_EVIDENCE_DIR
+    evidence_dir = SAMPLE_EVIDENCE_DIR
     
     # Required files
     assert (evidence_dir / "interviews").exists()

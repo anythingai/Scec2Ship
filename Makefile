@@ -2,7 +2,7 @@ VENV_PYTHON ?= .venv/bin/python
 VENV_UVICORN ?= .venv/bin/uvicorn
 NPM ?= npm
 
-.PHONY: run run-backend run-frontend run-all test clean-runtime help stop
+.PHONY: run run-backend run-frontend run-all test check clean-runtime help stop
 
 help:
 	@echo "Available targets:"
@@ -11,7 +11,9 @@ help:
 	@echo "  make run-frontend - Start only the frontend dev server"
 	@echo "  make run-all      - Start both services in background"
 	@echo "  make stop         - Stop all running services"
-	@echo "  make test         - Run backend tests"
+	@echo "  make test         - Run all backend tests (including integration)"
+	@echo "  make test-unit    - Run backend tests excluding integration (recommended for CI)"
+	@echo "  make check        - Run test-unit, lint, typecheck, build (CI verification)"
 	@echo "  make clean-runtime - Clean runtime data (runs/workspaces)"
 
 run: run-all
@@ -78,6 +80,20 @@ stop:
 test:
 	@echo "Running backend tests..."
 	$(VENV_PYTHON) -m pytest -c apps/api/pytest.ini apps/api/tests
+
+# Exclude Gemini-dependent integration tests (flaky due to model output variability)
+test-unit:
+	@echo "Running backend tests (excluding integration)..."
+	$(VENV_PYTHON) -m pytest -c apps/api/pytest.ini apps/api/tests -k "not test_api_run_flow_smoke and not test_run_completes_with_retry"
+
+check: test-unit
+	@echo "Running frontend lint..."
+	@cd apps/web && $(NPM) run lint
+	@echo "Running frontend type-check..."
+	@cd apps/web && $(NPM) run type-check
+	@echo "Building frontend..."
+	@cd apps/web && $(NPM) run build
+	@echo "✅ All checks passed"
 
 clean-runtime:
 	@echo "Cleaning runtime data..."

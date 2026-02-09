@@ -1,14 +1,111 @@
 "use client"
 
-import React, { useState, useRef, useEffect } from "react"
+import React, { useState, useRef, useEffect, useCallback } from "react"
 import type { RunState, RunSummary } from "@/lib/types"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { MermaidDiagram } from "./mermaid-diagram"
 import { RunSummaryCard } from "./run-summary"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || (typeof window !== "undefined" ? window.location.origin : "")
+
+function CollaborationPanel({ runId, onApproveRun }: { runId: string; onApproveRun: (approved: boolean) => void }) {
+  const [comments, setComments] = useState<Array<{ comment_id: string; text: string; author: string; created_at: string }>>([])
+  const [newComment, setNewComment] = useState("")
+  const loadComments = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/runs/${runId}/comments`)
+    if (res.ok) {
+      const d = await res.json()
+      setComments(d.comments || [])
+    }
+  }, [runId])
+  useEffect(() => {
+    const ac = new AbortController()
+    fetch(`${API_BASE}/runs/${runId}/comments`, { signal: ac.signal })
+      .then((r) => (r.ok ? r.json() : { comments: [] }))
+      .then((d) => setComments(d.comments || []))
+      .catch(() => {})
+    return () => ac.abort()
+  }, [runId])
+  const addComment = async () => {
+    if (!newComment.trim()) return
+    await fetch(`${API_BASE}/runs/${runId}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: newComment.trim() }),
+    })
+    setNewComment("")
+    loadComments()
+  }
+  return (
+    <div className="border-b border-primary/30 bg-primary/5 px-4 py-3 space-y-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="text-sm font-medium text-foreground">
+          PRD & design ready for review. Approve to continue or request changes.
+        </div>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs border-destructive/30 text-destructive hover:bg-destructive/10"
+            onClick={() => onApproveRun(false)}
+          >
+            Request Changes
+          </Button>
+          <Button size="sm" className="h-8 text-xs" onClick={() => onApproveRun(true)}>
+            Approve
+          </Button>
+        </div>
+      </div>
+      <div className="border-t border-border pt-2">
+        <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-2">Comments</div>
+        <div className="space-y-1 max-h-24 overflow-y-auto">
+          {comments.map((c) => (
+            <div key={c.comment_id} className="text-xs rounded bg-secondary/50 px-2 py-1">
+              <span className="text-muted-foreground">{c.author}: </span>
+              <span className="text-foreground">{c.text}</span>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2 mt-2">
+          <input
+            type="text"
+            value={newComment}
+            onChange={(e) => setNewComment(e.target.value)}
+            placeholder="Add comment..."
+            className="flex-1 h-7 rounded border border-border bg-background px-2 text-xs"
+            onKeyDown={(e) => e.key === "Enter" && addComment()}
+          />
+          <Button size="sm" className="h-7 text-xs" onClick={addComment} disabled={!newComment.trim()}>
+            Add
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={async () => {
+              const res = await fetch(`${API_BASE}/runs/${runId}/comments/resolve`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ apply: true }),
+              })
+              const d = await res.json()
+              if (d.status === "applied") {
+                alert(`PRD updated: ${d.suggestion}`)
+                window.location.reload()
+              } else if (d.suggestion) alert(`Suggestion: ${d.suggestion}`)
+              else if (d.message) alert(d.message)
+            }}
+          >
+            AI Resolve & Apply
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function MarkdownRenderer({ content }: { content: string }) {
   const lines = content.split("\n")
@@ -345,6 +442,8 @@ function EmptyTab({ title, description }: { title: string; description: string }
   )
 }
 
+const CONNECTOR_SOURCES = ["gong", "intercom", "linear", "posthog", "slack"]
+
 interface ArtifactsPanelProps {
   artifacts: RunState["artifacts"]
   status: RunState["status"]
@@ -354,6 +453,10 @@ interface ArtifactsPanelProps {
   summary: RunSummary | null
   failureMessage: string | null
   runId?: string | null
+  onApproveRun?: (approved: boolean) => void
+  onRefreshArtifacts?: (runId: string) => Promise<void>
+  linearUrl?: string | null
+  jiraUrl?: string | null
 }
 
 export function ArtifactsPanel({
@@ -365,9 +468,13 @@ export function ArtifactsPanel({
   summary,
   failureMessage,
   runId,
+  onApproveRun,
+  onRefreshArtifacts,
+  linearUrl,
+  jiraUrl,
 }: ArtifactsPanelProps) {
   const [copyMessage, setCopyMessage] = useState<string | null>(null)
-  const hasAnyArtifact = artifacts.prd || artifacts.tickets || artifacts.evidenceMap || artifacts.diff || artifacts.testReport
+  const hasAnyArtifact = artifacts.prd || artifacts.wireframes || artifacts.tickets || artifacts.evidenceMap || artifacts.diff || artifacts.testReport
   const isTerminal = status === "completed" || status === "failed"
   const canOpenPr = Boolean(summary?.prUrl)
   const downloadUrl = runId ? `${API_BASE}/runs/${runId}/artifacts/zip` : null
@@ -397,8 +504,36 @@ export function ArtifactsPanel({
     })
   }
 
+  const isAwaitingApproval = status === "awaiting_approval"
+
   return (
     <div className="flex h-full flex-col">
+      {isAwaitingApproval && onApproveRun && runId && (
+        <CollaborationPanel runId={runId} onApproveRun={onApproveRun} />
+      )}
+      {artifacts.deviationAlert && runId && (
+        <div className="mx-4 mt-3 flex items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/5 px-4 py-3">
+          <p className="text-xs text-foreground">{artifacts.deviationAlert.message}</p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs shrink-0 border-warning/40 text-warning hover:bg-warning/10"
+            onClick={async () => {
+              const res = await fetch(`${API_BASE}/runs/${runId}/update-prd-from-deviation`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({}),
+              })
+              const d = await res.json()
+              if (d.status === "updated" && onRefreshArtifacts) {
+                await onRefreshArtifacts(runId)
+              } else if (d.message) alert(d.message)
+            }}
+          >
+            Update PRD
+          </Button>
+        </div>
+      )}
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-sm font-semibold text-foreground">Artifacts</h2>
         <div className="flex items-center gap-2">
@@ -452,6 +587,27 @@ export function ArtifactsPanel({
               {canOpenPr ? "Open PR" : "PR unavailable"}
             </Button>
           )}
+          {/* Generate .cursorrules - download if available */}
+          {runId && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1.5 bg-transparent"
+              onClick={() => {
+                if (runId) window.open(`${API_BASE}/runs/${runId}/artifacts/.cursorrules`, "_blank")
+              }}
+              disabled={!runId}
+              title="Download .cursorrules for Cursor/Windsurf"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+              </svg>
+              .cursorrules
+            </Button>
+          )}
           {/* Download zip */}
           {hasAnyArtifact && (
             <Button
@@ -475,12 +631,18 @@ export function ArtifactsPanel({
       </div>
 
       <Tabs defaultValue="prd" className="flex flex-1 flex-col overflow-hidden">
-        <TabsList className="mx-4 mt-2 h-8 bg-secondary/50 p-0.5">
+        <TabsList className="mx-4 mt-2 h-8 bg-secondary/50 p-0.5 flex-wrap">
           <TabsTrigger value="prd" className="text-xs h-7 data-[state=active]:bg-card">PRD</TabsTrigger>
+          <TabsTrigger value="wireframes" className="text-xs h-7 data-[state=active]:bg-card">Wireframes</TabsTrigger>
+          <TabsTrigger value="userFlow" className="text-xs h-7 data-[state=active]:bg-card">User Flow</TabsTrigger>
           <TabsTrigger value="tickets" className="text-xs h-7 data-[state=active]:bg-card">Tickets</TabsTrigger>
           <TabsTrigger value="evidence" className="text-xs h-7 data-[state=active]:bg-card">Evidence</TabsTrigger>
           <TabsTrigger value="diff" className="text-xs h-7 data-[state=active]:bg-card">Diff</TabsTrigger>
           <TabsTrigger value="tests" className="text-xs h-7 data-[state=active]:bg-card">Tests</TabsTrigger>
+          <TabsTrigger value="audit" className="text-xs h-7 data-[state=active]:bg-card">Audit</TabsTrigger>
+          {artifacts.decisionMemo && <TabsTrigger value="decisionMemo" className="text-xs h-7 data-[state=active]:bg-card">Decision Memo</TabsTrigger>}
+          {artifacts.goToMarket && <TabsTrigger value="goToMarket" className="text-xs h-7 data-[state=active]:bg-card">GTM</TabsTrigger>}
+          {artifacts.analyticsSpec && <TabsTrigger value="analyticsSpec" className="text-xs h-7 data-[state=active]:bg-card">Analytics</TabsTrigger>}
           {summary && <TabsTrigger value="summary" className="text-xs h-7 data-[state=active]:bg-card">Summary</TabsTrigger>}
         </TabsList>
 
@@ -489,9 +651,50 @@ export function ArtifactsPanel({
             {artifacts.prd ? <MarkdownRenderer content={artifacts.prd} /> : <EmptyTab title="No PRD yet" description="PRD will appear after the Generate PRD stage completes" />}
           </TabsContent>
 
+          <TabsContent value="wireframes" className="mt-0">
+            {artifacts.wireframes ? (
+              <div className="p-4">
+                <div className="rounded-lg border border-border overflow-hidden bg-background">
+                  <iframe
+                    srcDoc={artifacts.wireframes}
+                    title="Wireframes"
+                    className="w-full min-h-[400px] border-0"
+                    sandbox="allow-same-origin"
+                  />
+                </div>
+              </div>
+            ) : (
+              <EmptyTab title="No wireframes yet" description="Wireframes will appear after the Generate Design stage completes" />
+            )}
+          </TabsContent>
+
+          <TabsContent value="userFlow" className="mt-0">
+            {artifacts.userFlow ? (
+              <div className="p-4">
+                <MermaidDiagram chart={artifacts.userFlow} />
+              </div>
+            ) : (
+              <EmptyTab title="No user flow yet" description="User flow diagram will appear after the Generate Design stage completes" />
+            )}
+          </TabsContent>
+
           <TabsContent value="tickets" className="mt-0">
             {artifacts.tickets ? (
               <div>
+                {(linearUrl || jiraUrl) && (
+                  <div className="mx-4 mt-2 flex gap-2">
+                    {linearUrl && (
+                      <a href={linearUrl} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline">
+                        Open in Linear →
+                      </a>
+                    )}
+                    {jiraUrl && (
+                      <a href={jiraUrl} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline">
+                        Open in Jira →
+                      </a>
+                    )}
+                  </div>
+                )}
                 {artifacts.ticketsEpicTitle && (
                   <div className="border-b border-border px-4 py-3">
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Epic</div>
@@ -506,7 +709,33 @@ export function ArtifactsPanel({
           </TabsContent>
 
           <TabsContent value="evidence" className="mt-0">
-            {artifacts.evidenceMap ? <EvidenceMapView evidenceMap={artifacts.evidenceMap} showCitations={showCitations} /> : <EmptyTab title="No evidence map yet" description="Evidence map will appear after the Synthesize stage completes" />}
+            {artifacts.evidenceMap ? (
+              <div className="space-y-2">
+                <div className="mx-4 mt-2 flex flex-wrap gap-2">
+                  {artifacts.evidenceMap.claims.some((c) =>
+                    c.supporting_sources?.some((s) => String(s.file || "").toLowerCase().includes("competitor"))
+                  ) && (
+                    <Badge variant="outline" className="text-[10px] border-warning/30 text-warning bg-warning/5">
+                      Competitive gap — evidence from competitors analysis
+                    </Badge>
+                  )}
+                  {artifacts.evidenceMap.claims.some((c) =>
+                    c.supporting_sources?.some((s) =>
+                      CONNECTOR_SOURCES.some((conn) =>
+                        String(s.file || "").toLowerCase().includes(conn)
+                      )
+                    )
+                  ) && (
+                    <Badge variant="outline" className="text-[10px] border-primary/30 text-primary bg-primary/5">
+                      Live connector data
+                    </Badge>
+                  )}
+                </div>
+                <EvidenceMapView evidenceMap={artifacts.evidenceMap} showCitations={showCitations} />
+              </div>
+            ) : (
+              <EmptyTab title="No evidence map yet" description="Evidence map will appear after the Synthesize stage completes" />
+            )}
           </TabsContent>
 
           <TabsContent value="diff" className="mt-0">
@@ -516,6 +745,95 @@ export function ArtifactsPanel({
           <TabsContent value="tests" className="mt-0">
             {artifacts.testReport ? <MarkdownRenderer content={artifacts.testReport} /> : <EmptyTab title="No test report yet" description="Test report will appear after the Verify stage completes" />}
           </TabsContent>
+
+          <TabsContent value="audit" className="mt-0">
+            {artifacts.auditTrail ? (
+              <div className="p-4 space-y-4">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Search by feature, claim..."
+                    className="flex-1 h-8 rounded-md border border-border bg-secondary/50 px-2 text-xs placeholder:text-muted-foreground"
+                    onChange={(e) => {
+                      const q = e.target.value.toLowerCase().trim()
+                      const el = document.getElementById("audit-search-results")
+                      if (el) {
+                        const items = el.querySelectorAll("[data-audit-text]")
+                        items.forEach((item) => {
+                          const text = (item.getAttribute("data-audit-text") || "").toLowerCase()
+                          ;(item as HTMLElement).style.display = !q || text.includes(q) ? "" : "none"
+                        })
+                      }
+                    }}
+                  />
+                  <span className="text-[10px] text-muted-foreground self-center">Audit trail search</span>
+                </div>
+                <div id="audit-search-results">
+                <div className="rounded-lg border border-primary/20 bg-primary/5 p-4" data-audit-text={String(artifacts.auditTrail.feature_choice_rationale ?? "")}>
+                  <h3 className="text-sm font-semibold text-foreground">Why did we build this?</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {typeof artifacts.auditTrail.feature_choice_rationale === "string"
+                      ? artifacts.auditTrail.feature_choice_rationale
+                      : "No rationale captured."}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border p-4">
+                  <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Evidence Sources</h3>
+                  <ul className="space-y-1 text-xs">
+                    {(artifacts.auditTrail.evidence_sources as Array<{ claim_id?: string; claim_text?: string; confidence?: number }>)?.map((s, i) => (
+                      <li key={i} className="flex gap-2" data-audit-text={`${s.claim_id ?? ""} ${s.claim_text ?? ""}`}>
+                        <span className="font-mono text-muted-foreground">{s.claim_id}</span>
+                        <span className="text-foreground">{s.claim_text}</span>
+                        {s.confidence != null && <span className="text-success">{Math.round(s.confidence * 100)}%</span>}
+                      </li>
+                    )) ?? []}
+                  </ul>
+                </div>
+                <div className="rounded-lg border border-border p-4" data-audit-text={JSON.stringify(artifacts.auditTrail)}>
+                  <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Run Details</h3>
+                  <pre className="text-[10px] font-mono text-muted-foreground overflow-x-auto">
+                    {JSON.stringify(artifacts.auditTrail, null, 2)}
+                  </pre>
+                </div>
+                </div>
+              </div>
+            ) : (
+              <EmptyTab title="No audit trail yet" description="Audit trail will appear after the Export stage completes" />
+            )}
+          </TabsContent>
+
+          {artifacts.decisionMemo && (
+            <TabsContent value="decisionMemo" className="mt-0">
+              <div className="p-4">
+                <MarkdownRenderer content={artifacts.decisionMemo} />
+              </div>
+            </TabsContent>
+          )}
+          {artifacts.goToMarket && (
+            <TabsContent value="goToMarket" className="mt-0">
+              <div className="p-4">
+                <MarkdownRenderer content={artifacts.goToMarket} />
+              </div>
+            </TabsContent>
+          )}
+          {artifacts.analyticsSpec && (
+            <TabsContent value="analyticsSpec" className="mt-0">
+              <div className="p-4">
+                <pre className="rounded-lg border border-border bg-secondary/30 p-4 text-xs font-mono overflow-x-auto whitespace-pre-wrap">
+                  {(() => {
+                    try {
+                      const parsed = typeof artifacts.analyticsSpec === "string"
+                        ? JSON.parse(artifacts.analyticsSpec)
+                        : artifacts.analyticsSpec
+                      return JSON.stringify(parsed, null, 2)
+                    } catch {
+                      return artifacts.analyticsSpec
+                    }
+                  })()}
+                </pre>
+              </div>
+            </TabsContent>
+          )}
 
           {summary && (
             <TabsContent value="summary" className="mt-0 p-4">
