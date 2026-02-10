@@ -10,7 +10,7 @@ cd apps/web && npm install && cd ../..
 make run
 ```
 
-Open **http://localhost:3000**.
+Open **<http://localhost:3000>**.
 
 ---
 
