@@ -3,7 +3,7 @@
 ## Run the app (one command)
 
 ```bash
-git clone <repo-url> && cd Scec2Ship
+git clone <repo-url> && cd Growpad
 python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r apps/api/requirements.txt
 cd apps/web && npm install && cd ../..

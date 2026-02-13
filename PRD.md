@@ -43,15 +43,6 @@
 | **Innovation / Wow Factor** | 30%    | Evidence→PR with self-healing verification loop                              |
 | **Presentation / Demo**     | 10%    | Clear problem, effective demo, Gemini integration docs, architecture diagram |
 
-### 1.3 Submission Operations Checklist (Devpost)
-
-- [ ] Final build is publicly accessible and usable without paywall/login blockers.
-- [ ] Devpost text explicitly explains Gemini 3 usage and why app fails without Gemini.
-- [ ] Public repo link is valid and README includes one-command local run path.
-- [ ] Demo video is concise and shows real product behavior (not slides-only).
-- [ ] Video sequence covers: problem → product flow → fail→self-heal proof → impact.
-- [ ] Submission package is verified only after production readiness checks are complete.
-
 ---
 
 ## 2. Problem Statement
@@ -1038,16 +1029,6 @@ Product management is a team sport. The system must support collaborative decisi
 - [ ] **AC-38** AI resolves comments and updates artifacts automatically.
 - [ ] **AC-39** Audit trail provides queryable history of "why did we build this?" decisions.
 
-### 12.8 Hackathon Submission
-
-- [ ] **AC-17** Public demo link, no login/paywall.
-- [ ] **AC-18** Public code repository with clear README and run instructions.
-- [ ] **AC-19** ~3-minute demo video: success path + intentional failure + self-correction.
-- [ ] **AC-20** ~200-word Gemini integration description in Devpost submission.
-- [ ] **AC-21** Submission is in English (or includes English subtitles/translations).
-- [ ] **AC-22** App behavior demonstrated in video matches real executable app behavior.
-- [ ] **AC-23** Stage-1 viability: all required submission fields and links are complete and valid.
-
 ---
 
 ## 13. Production Delivery Plan
@@ -1236,7 +1217,3 @@ Each phase delivers standalone value while building toward the complete vision.
 
 - [Gemini 3 Hackathon](https://gemini3.devpost.com/)
 - [Hackathon Rules](https://gemini3.devpost.com/rules)
-- [Architecture](docs/architecture.md)
-- [User Flow](docs/user-flow.md)
-- [Deployment Runbook](docs/deployment-runbook.md)
-- [Governance & Quality](docs/governance-quality.md)

@@ -57,6 +57,8 @@ class WorkspaceCreateRequest(BaseModel):
     linear_url: str | None = None
     jira_url: str | None = None
     team_roles: dict[str, str] = Field(default_factory=dict)
+    integration_config: dict[str, dict[str, str]] = Field(default_factory=dict)
+    competitor_urls: list[str] = Field(default_factory=list)
 
 
 class WorkspaceConfig(WorkspaceCreateRequest):

@@ -485,7 +485,7 @@ export function ArtifactsPanel({
     // Generate comprehensive shareable link with both run view and artifact download
     const baseUrl = typeof window !== "undefined" ? window.location.origin : API_BASE
     const runViewUrl = runId ? `${baseUrl}/runs/${runId}` : shareUrl
-    const artifactZipUrl = runId ? `${baseUrl}/api/runs/${runId}/artifacts/zip` : null
+    const artifactZipUrl = runId ? `${baseUrl}/runs/${runId}/artifacts/zip` : null
     
     // Create shareable text with both URLs
     const shareableText = artifactZipUrl

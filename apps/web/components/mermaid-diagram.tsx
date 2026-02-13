@@ -45,7 +45,7 @@ export function MermaidDiagram({ chart, className = "" }: MermaidDiagramProps) {
           {chart}
         </pre>
         <p className="mt-2 text-[10px] text-muted-foreground">
-          Paste at <a href="https://mermaid.live" target="_blank" rel="noreferrer" className="text-primary underline">mermaid.live</a> to render.
+          Paste at <a href="https://mermaid.live" target="_blank" rel="noopener noreferrer" className="text-primary underline">mermaid.live</a> to render.
         </p>
       </div>
     )

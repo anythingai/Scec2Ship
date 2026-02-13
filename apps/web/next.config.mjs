@@ -17,6 +17,12 @@ const nextConfig = {
       { source: '/runs/:path*', destination: `${apiBase}/runs/:path*` },
       { source: '/auth/:path*', destination: `${apiBase}/auth/:path*` },
       { source: '/sample/:path*', destination: `${apiBase}/sample/:path*` },
+      { source: '/integrations', destination: `${apiBase}/integrations` },
+      { source: '/integrations/:path*', destination: `${apiBase}/integrations/:path*` },
+      { source: '/competitor-gap', destination: `${apiBase}/competitor-gap` },
+      { source: '/audit-trail', destination: `${apiBase}/audit-trail` },
+      { source: '/metrics', destination: `${apiBase}/metrics` },
+      { source: '/webhooks/:path*', destination: `${apiBase}/webhooks/:path*` },
     ]
   },
 }

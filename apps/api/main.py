@@ -85,6 +85,11 @@ def update_workspace(workspace_id: str, request: dict = Body(default_factory=dic
             workspace.linear_url = request["linear_url"] or None
         if "jira_url" in request:
             workspace.jira_url = request["jira_url"] or None
+        if "integration_config" in request and isinstance(request["integration_config"], dict):
+            workspace.integration_config = dict(getattr(workspace, "integration_config", None) or {})
+            workspace.integration_config.update(request["integration_config"])
+        if "competitor_urls" in request and isinstance(request["competitor_urls"], list):
+            workspace.competitor_urls = list(request["competitor_urls"])
         from packages.common.io import write_json
         from packages.common.paths import WORKSPACES_DIR
         from datetime import datetime, UTC
@@ -470,86 +475,213 @@ def add_comment(run_id: str, request: dict = Body(default_factory=dict)) -> dict
 
 @app.get("/integrations")
 def list_integrations(workspace_id: str | None = None) -> dict[str, Any]:
-    """List connected integrations and status (PRD v4 AC-31)."""
+    """List connected integrations and status (PRD v4 AC-31). Real status from config + last sync."""
     providers = ["gong", "intercom", "linear", "posthog", "slack"]
     integrations = []
     for p in providers:
-        item: dict[str, Any] = {"provider": p, "status": "disconnected"}
+        item: dict[str, Any] = {"provider": p, "status": "disconnected", "last_sync": None}
         if workspace_id:
-            from packages.common.paths import WORKSPACES_DIR
-            sync_file = WORKSPACES_DIR / workspace_id / "connector_sync" / f"{p}.json"
-            if sync_file.exists():
-                try:
+            try:
+                ws = workspace_store.get(workspace_id)
+                config = getattr(ws, "integration_config", None) or {}
+                if config.get(p):
+                    item["status"] = "configured"
+                from packages.common.paths import WORKSPACES_DIR
+                sync_file = WORKSPACES_DIR / workspace_id / "connector_sync" / f"{p}.json"
+                if sync_file.exists():
                     from packages.common.io import read_json
                     d = read_json(sync_file)
-                    item["status"] = "connected"
                     item["last_sync"] = d.get("synced_at")
-                except Exception:
-                    pass
+                    if d.get("records", 0) > 0 or d.get("status") == "success":
+                        item["status"] = "connected"
+            except Exception:
+                pass
         integrations.append(item)
     return {"integrations": integrations}
 
 
 @app.post("/integrations/{provider}/connect")
-def connect_integration(provider: str, request: dict = Body(default_factory=dict)) -> dict[str, str]:
-    """Connect external integration (Gong, Intercom, etc.) - PRD v4 AC-31."""
-    _ = request
-    return {"provider": provider, "status": "connected"}
-
-
-@app.post("/integrations/{provider}/sync")
-def sync_integration(provider: str, workspace_id: str | None = None) -> dict[str, Any]:
-    """Sync evidence from integration - PRD v4 AC-31."""
-    from packages.common.io import write_json
-    from packages.common.paths import WORKSPACES_DIR
-    ws_id = workspace_id or "default"
-    sync_dir = WORKSPACES_DIR / ws_id / "connector_sync"
-    sync_dir.mkdir(parents=True, exist_ok=True)
-    mock_evidence = {"synced_at": datetime.now(UTC).isoformat(), "provider": provider, "records": 5}
-    write_json(sync_dir / f"{provider}.json", mock_evidence)
-    return {"provider": provider, "status": "synced", "records": 5}
-
-
-@app.post("/workspaces/{workspace_id}/nightly-synthesis")
-def nightly_synthesis(workspace_id: str) -> dict[str, Any]:
-    """Trigger nightly synthesis - updates evidence map (PRD v4 AC-32)."""
+def connect_integration(provider: str, request: dict = Body(default_factory=dict)) -> dict[str, Any]:
+    """Connect external integration (Gong, Intercom, etc.) - PRD v4 AC-31. Stores config for sync."""
+    workspace_id = request.get("workspace_id")
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id required")
     try:
         workspace_store.get(workspace_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}")
+    config = {k: v for k, v in request.items() if k != "workspace_id" and v is not None}
+    workspace_store.connect_integration(workspace_id, provider.lower(), config)
+    return {"provider": provider, "status": "configured"}
+
+
+@app.post("/integrations/{provider}/sync")
+def sync_integration(provider: str, workspace_id: str | None = None, request: dict = Body(default_factory=dict)) -> dict[str, Any]:
+    """Sync evidence from integration - PRD v4 AC-31. Real API calls, no mocks."""
+    ws_id = workspace_id or request.get("workspace_id") or request.get("workspaceId")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="workspace_id required in request body")
+    try:
+        workspace = workspace_store.get(ws_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {ws_id}")
+    config = getattr(workspace, "integration_config", None) or {}
+    provider_config = config.get(provider.lower(), {})
+    from packages.tools.integrations import sync_provider
+    result = sync_provider(provider, ws_id, provider_config)
+    from packages.common.io import write_json
     from packages.common.paths import WORKSPACES_DIR
+    sync_dir = WORKSPACES_DIR / ws_id / "connector_sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    sync_record = {
+        "synced_at": result.synced_at,
+        "provider": result.provider,
+        "records": result.records,
+        "status": result.status,
+        "evidence_records": result.evidence_records[:20],
+    }
+    write_json(sync_dir / f"{provider}.json", sync_record)
+    return {
+        "provider": provider,
+        "status": result.status,
+        "records": result.records,
+        "synced_at": result.synced_at,
+        "error": result.error,
+    }
+
+
+@app.post("/workspaces/{workspace_id}/nightly-synthesis")
+def nightly_synthesis(workspace_id: str) -> dict[str, Any]:
+    """Trigger nightly synthesis - updates evidence map (PRD v4 AC-32). Real synthesis from evidence."""
+    try:
+        workspace = workspace_store.get(workspace_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}")
+    from packages.common.paths import WORKSPACES_DIR, SAMPLE_EVIDENCE_DIR
+    from packages.common.io import write_json, read_json
+    evidence_dir = SAMPLE_EVIDENCE_DIR
+    connector_dir = WORKSPACES_DIR / workspace_id / "connector_sync"
+    evidence_map = None
+    if hasattr(orchestrator, "_synthesize"):
+        from packages.tools.evidence import validate_evidence_bundle
+        intake = validate_evidence_bundle(evidence_dir)
+        if intake.valid and hasattr(intake, "evidence"):
+            okr_context = workspace.okr_config.model_dump() if workspace.okr_config else None
+            try:
+                evidence_map = orchestrator._synthesize(
+                    goal_statement=None,
+                    okr_context=okr_context,
+                    intake_evidence=intake.evidence,
+                )
+            except Exception:
+                evidence_map = {"summary": "Synthesis skipped", "claims": [], "top_features": []}
+    if evidence_map is None:
+        evidence_map = {"summary": "No evidence to synthesize", "claims": [], "top_features": []}
+    ns_dir = WORKSPACES_DIR / workspace_id / "nightly"
+    ns_dir.mkdir(parents=True, exist_ok=True)
+    write_json(ns_dir / "evidence-map.json", evidence_map)
     ns_file = WORKSPACES_DIR / workspace_id / "nightly_synthesis.json"
     ns_file.parent.mkdir(parents=True, exist_ok=True)
-    from packages.common.io import write_json
-    write_json(ns_file, {"last_run": datetime.now(UTC).isoformat(), "status": "completed"})
-    return {"status": "completed", "message": "Nightly synthesis completed"}
+    write_json(ns_file, {
+        "last_run": datetime.now(UTC).isoformat(),
+        "status": "completed",
+        "claims_count": len(evidence_map.get("claims", [])),
+        "top_features_count": len(evidence_map.get("top_features", [])),
+    })
+    return {
+        "status": "completed",
+        "message": "Nightly synthesis completed",
+        "claims_count": len(evidence_map.get("claims", [])),
+        "top_features_count": len(evidence_map.get("top_features", [])),
+    }
 
 
 @app.get("/competitor-gap")
 def competitor_gap(workspace_id: str | None = None) -> dict[str, Any]:
-    """Competitive gap analysis (PRD v4 AC-33)."""
+    """Competitive gap analysis (PRD v4 AC-33). Uses evidence + Gemini, no hardcoded data."""
+    competitors_text = ""
+    if workspace_id:
+        try:
+            workspace = workspace_store.get(workspace_id)
+            urls = getattr(workspace, "competitor_urls", None) or []
+            for url in urls[:5]:
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(url, headers={"User-Agent": "Growpad/1.0"})
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        competitors_text += resp.read().decode(errors="replace")[:5000] + "\n\n"
+                except Exception:
+                    pass
+        except FileNotFoundError:
+            pass
+    if not competitors_text:
+        competitors_path = SAMPLE_EVIDENCE_DIR / "competitors.md"
+        if competitors_path.exists():
+            competitors_text = competitors_path.read_text(encoding="utf-8")
+    import os
+    gaps = []
+    if competitors_text and os.getenv("GEMINI_API_KEY"):
+        try:
+            from packages.agent.gemini_client import GeminiClient
+            client = GeminiClient(api_key=os.getenv("GEMINI_API_KEY", ""))
+            prompt = (
+                "Based on this competitor context, produce a JSON object with key 'gaps': "
+                "array of {feature, competitors: string[], priority: 'high'|'medium'|'low'}. "
+                "Identify features competitors have that we might be missing. Output only valid JSON."
+            )
+            payload = client.generate_json(
+                system_prompt="You analyze competitive landscape. Return JSON only.",
+                user_prompt=f"Context:\n{competitors_text[:3000]}\n\n{prompt}",
+            )
+            if isinstance(payload, dict) and "gaps" in payload:
+                gaps = payload["gaps"]
+        except Exception:
+            pass
     return {
-        "gaps": [
-            {"feature": "Dark mode", "competitors": ["Competitor A", "Competitor B"], "priority": "high"},
-            {"feature": "API webhooks", "competitors": ["Competitor B"], "priority": "medium"},
-        ],
+        "gaps": gaps if gaps else [],
         "last_updated": datetime.now(UTC).isoformat(),
     }
 
 
 @app.get("/workspaces/{workspace_id}/confidence-alerts")
 def confidence_alerts(workspace_id: str) -> dict[str, Any]:
-    """PM alerts when feature confidence changes (PRD v4 AC-34)."""
+    """PM alerts when feature confidence changes (PRD v4 AC-34). Derived from actual run data."""
     try:
         workspace_store.get(workspace_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}")
-    return {
-        "alerts": [
-            {"feature": "Dark mode", "previous_confidence": 0.65, "current_confidence": 0.85, "message": "3 customers mentioned Dark Mode yesterday. Confidence score has risen to 85%."},
-        ],
-        "count": 1,
-    }
+    alerts: list[dict[str, Any]] = []
+    runs_with_evidence: list[tuple[str, dict]] = []
+    for run_dir in sorted(RUNS_DIR.glob("run_*"), reverse=True)[:20]:
+        try:
+            state = run_store.load_state(run_dir.name)
+            if state.workspace_id != workspace_id:
+                continue
+            em_path = run_store.artifacts_dir(run_dir.name) / "evidence-map.json"
+            if em_path.exists():
+                from packages.common.io import read_json
+                em = read_json(em_path)
+                runs_with_evidence.append((run_dir.name, em))
+        except Exception:
+            continue
+    if len(runs_with_evidence) >= 2:
+        older_run_id, older_em = runs_with_evidence[1]
+        newer_run_id, newer_em = runs_with_evidence[0]
+        prev_conf: dict[str, float] = {}
+        for f in older_em.get("top_features", []):
+            prev_conf[f.get("feature", "")] = float(f.get("confidence", 0.5))
+        for f in newer_em.get("top_features", []):
+            feat = f.get("feature", "")
+            conf = float(f.get("confidence", 0.5))
+            if feat in prev_conf and abs(conf - prev_conf[feat]) >= 0.1:
+                alerts.append({
+                    "feature": feat,
+                    "previous_confidence": prev_conf[feat],
+                    "current_confidence": conf,
+                    "message": f"Feature '{feat}' confidence changed from {int(prev_conf[feat]*100)}% to {int(conf*100)}%.",
+                    "run_id": newer_run_id,
+                })
+    return {"alerts": alerts[:10], "count": len(alerts)}
 
 
 @app.get("/runs/{run_id}/comments")

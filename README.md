@@ -8,14 +8,14 @@ A verification-first product execution agent that converts scattered product evi
 
 ```bash
 # Prerequisites: Python 3.11+, Node.js 18+, Git
-git clone <repo-url> && cd Scec2Ship
+git clone <repo-url> && cd Growpad
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r apps/api/requirements.txt
 cd apps/web && npm install && cd ../..
 make run
 ```
 
-Then open **http://localhost:3000**. Load sample evidence, create a workspace, and run the pipeline.
+Then open **<http://localhost:3000>**. Load sample evidence, create a workspace, and run the pipeline.
 
 ---
 
@@ -112,19 +112,19 @@ Result: Converts weeks of synthesis + coordination into a verified execution pip
 
 ## Core Workflow (9 Stages)
 
-| Stage | ID                 | Description                                                      | Input                       | Output                                    |
-| ----- | ------------------ | ---------------------------------------------------------------- | --------------------------- | ----------------------------------------- |
-| 0     | `INTAKE`           | Validate evidence, detect stack, create run_id                   | Evidence bundle             | State file + validation result            |
-| 1     | `SYNTHESIZE`       | Cluster evidence, rank themes, generate top 3 candidate features | Evidence                    | Top 3 features + rationale + evidence map |
-| 2     | `SELECT_FEATURE`   | User selects feature (or auto-pick in fast mode)                 | Top 3 features              | Selected feature                          |
-| 3     | `GENERATE_PRD`     | Produce PRD with acceptance criteria                             | Selected feature + evidence | `PRD.md`                                  |
-| 3.5   | `GENERATE_DESIGN`  | Generate wireframes and user flow diagrams                       | PRD + design tokens         | `wireframes.html`, `user-flow.mmd`       |
-| 3.6   | `AWAITING_APPROVAL`| (Optional) Stakeholder review of PRD + design                     | PRD + wireframes            | Approval/rejection + comments             |
-| 4     | `GENERATE_TICKETS` | Produce structured tickets with owners and estimates             | PRD + design                | `tickets.json`                            |
-| 5     | `IMPLEMENT`        | Generate implementation plan, apply diff, create PR              | Tickets + repo context      | `diff.patch` or PR                        |
-| 6     | `VERIFY`           | Run tests/lint/typecheck in CI-like runner                       | Patch + repo                | Test stdout/stderr, exit code             |
-| 7     | `SELF_HEAL`        | On verify fail: generate correction patch                        | Failure log + diff          | New patch                                 |
-| 8     | `EXPORT`           | Package artifacts for download                                   | All artifacts               | `artifacts.zip`                           |
+| Stage | ID                  | Description                                                      | Input                       | Output                                    |
+| ----- | ------------------- | ---------------------------------------------------------------- | --------------------------- | ----------------------------------------- |
+| 0     | `INTAKE`            | Validate evidence, detect stack, create run_id                   | Evidence bundle             | State file + validation result            |
+| 1     | `SYNTHESIZE`        | Cluster evidence, rank themes, generate top 3 candidate features | Evidence                    | Top 3 features + rationale + evidence map |
+| 2     | `SELECT_FEATURE`    | User selects feature (or auto-pick in fast mode)                 | Top 3 features              | Selected feature                          |
+| 3     | `GENERATE_PRD`      | Produce PRD with acceptance criteria                             | Selected feature + evidence | `PRD.md`                                  |
+| 3.5   | `GENERATE_DESIGN`   | Generate wireframes and user flow diagrams                       | PRD + design tokens         | `wireframes.html`, `user-flow.mmd`        |
+| 3.6   | `AWAITING_APPROVAL` | (Optional) Stakeholder review of PRD + design                    | PRD + wireframes            | Approval/rejection + comments             |
+| 4     | `GENERATE_TICKETS`  | Produce structured tickets with owners and estimates             | PRD + design                | `tickets.json`                            |
+| 5     | `IMPLEMENT`         | Generate implementation plan, apply diff, create PR              | Tickets + repo context      | `diff.patch` or PR                        |
+| 6     | `VERIFY`            | Run tests/lint/typecheck in CI-like runner                       | Patch + repo                | Test stdout/stderr, exit code             |
+| 7     | `SELF_HEAL`         | On verify fail: generate correction patch                        | Failure log + diff          | New patch                                 |
+| 8     | `EXPORT`            | Package artifacts for download                                   | All artifacts               | `artifacts.zip`                           |
 
 **State Transitions:**
 
@@ -178,10 +178,10 @@ START → INTAKE → SYNTHESIZE → SELECT_FEATURE → GENERATE_PRD → GENERATE
 
 ### User Experience (3-Panel UI)
 
-| Panel         | Description                                                                                |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| **Input**     | Evidence upload, GitHub connect, guardrails configuration, OKR config, "Load sample" button |
-| **Timeline**  | Stage list with status badges, streaming log lines, retry counter (0/2, 1/2, 2/2)            |
+| Panel         | Description                                                                                     |
+| ------------- | ----------------------------------------------------------------------------------------------- |
+| **Input**     | Evidence upload, GitHub connect, guardrails configuration, OKR config, "Load sample" button     |
+| **Timeline**  | Stage list with status badges, streaming log lines, retry counter (0/2, 1/2, 2/2)               |
 | **Artifacts** | Tabs: PRD, Wireframes, User Flow, Tickets, Evidence Map, Diff, Tests, Audit Trail, Download Zip |
 
 **Trust-Building Features:**
@@ -309,16 +309,16 @@ Per run (`data/runs/<run_id>/artifacts/`):
 
 ### Gemini 3 Usage Points
 
-| Stage                | Gemini 3 Role                                 | Input                        | Output                        |
-| -------------------- | --------------------------------------------- | ---------------------------- | ----------------------------- |
-| **Synthesize**       | Evidence clustering and feature selection     | Interviews, tickets, metrics | Top 3 features + evidence-map |
-| **Select Feature**   | Feature ranking validation (if user override) | Top 3 features               | Selected feature              |
-| **Generate PRD**     | PRD authoring                                 | Feature + evidence           | `PRD.md`                      |
+| Stage                | Gemini 3 Role                                 | Input                        | Output                             |
+| -------------------- | --------------------------------------------- | ---------------------------- | ---------------------------------- |
+| **Synthesize**       | Evidence clustering and feature selection     | Interviews, tickets, metrics | Top 3 features + evidence-map      |
+| **Select Feature**   | Feature ranking validation (if user override) | Top 3 features               | Selected feature                   |
+| **Generate PRD**     | PRD authoring                                 | Feature + evidence           | `PRD.md`                           |
 | **Generate Design**  | Wireframes and user flow                      | PRD + design tokens          | `wireframes.html`, `user-flow.mmd` |
-| **Generate Tickets** | Ticket breakdown                              | PRD + design                 | `tickets.json`                |
-| **Implement**        | Code generation                               | Tickets + repo context       | Unified diff                  |
-| **Verify (Auditor)** | Failure analysis and fix                      | Failure log + diff           | Correction patch              |
-| **Agent Handoff**    | Context file generation                        | PRD + tickets                | `.cursorrules`, `.windsurfrules` |
+| **Generate Tickets** | Ticket breakdown                              | PRD + design                 | `tickets.json`                     |
+| **Implement**        | Code generation                               | Tickets + repo context       | Unified diff                       |
+| **Verify (Auditor)** | Failure analysis and fix                      | Failure log + diff           | Correction patch                   |
+| **Agent Handoff**    | Context file generation                       | PRD + tickets                | `.cursorrules`, `.windsurfrules`   |
 
 All generation stages use Gemini 3 API. Without Gemini 3, the system falls back to deterministic templates.
 
@@ -415,29 +415,6 @@ This repository now contains a working production-style MVP aligned to the PRD/d
 4. Open PR with checklist
 5. Address review comments
 6. Merge after CI and approvals
-
----
-
-## Documentation
-
-| Document                                                       | Description                                                                                         |
-| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| [PRD.md](PRD.md)                                               | Product requirements, functional specifications, acceptance criteria, onboarding, detailed workflow |
-| [docs/architecture.md](docs/architecture.md)                   | System architecture, C4 views, backend services, data models, API design                            |
-| [docs/user-flow.md](docs/user-flow.md)                         | User flows, personas, UX requirements, accessibility                                                |
-| [docs/development-lifecycle.md](docs/development-lifecycle.md) | Engineering standards, CI/CD, testing, quality metrics                                              |
-| [docs/deployment-runbook.md](docs/deployment-runbook.md)       | Deployment procedures, operational controls, incident response                                      |
-| [docs/governance-quality.md](docs/governance-quality.md)       | Security, testing, release governance, audit trails                                                 |
-
----
-
-## Hackathon: Gemini 3 Hackathon
-
-- **Deadline:** February 9, 2026 @ 5:00pm PST
-- **Requirements:** New application, Gemini 3 API, public demo, public repo, ~3-minute video
-- **Judging Criteria:** Technical Execution (40%), Impact (20%), Innovation (30%), Presentation (10%)
-- **Details:** [gemini3.devpost.com](https://gemini3.devpost.com/)
-- **Devpost Write-Up:** See [DEVPOST.md](DEVPOST.md) for the ~200-word Gemini 3 integration description
 
 ---
 

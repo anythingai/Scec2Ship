@@ -16,7 +16,7 @@ help:
 	@echo "  make check        - Run test-unit, lint, typecheck, build (CI verification)"
 	@echo "  make clean-runtime - Clean runtime data (runs/workspaces)"
 
-run: run-all
+run:
 	@echo ""
 	@echo "✅ Both services starting..."
 	@echo "   Backend:  http://127.0.0.1:8000"
@@ -25,7 +25,8 @@ run: run-all
 	@echo "Press Ctrl+C to stop both services"
 	@echo ""
 	@trap 'make stop' INT TERM; \
-	$(VENV_UVICORN) apps.api.main:app --reload --host 127.0.0.1 --port 8000 & \
+	$(VENV_UVICORN) apps.api.main:app --reload --host 127.0.0.1 --port 8000 \
+		--reload-dir apps --reload-dir packages & \
 	BACKEND_PID=$$!; \
 	cd apps/web && $(NPM) run dev & \
 	FRONTEND_PID=$$!; \
@@ -36,7 +37,8 @@ run-backend:
 	@echo "Backend will be available at http://127.0.0.1:8000"
 	@echo "API docs available at http://127.0.0.1:8000/docs"
 	@echo ""
-	$(VENV_UVICORN) apps.api.main:app --reload --host 127.0.0.1 --port 8000
+	$(VENV_UVICORN) apps.api.main:app --reload --host 127.0.0.1 --port 8000 \
+		--reload-dir apps --reload-dir packages
 
 run-frontend:
 	@echo "Starting frontend dev server..."
@@ -50,7 +52,9 @@ run-all:
 	@echo "Frontend: http://localhost:3000"
 	@echo ""
 	@echo "Starting backend..."
-	@$(VENV_UVICORN) apps.api.main:app --reload --host 127.0.0.1 --port 8000 > /tmp/growpad_backend.log 2>&1 & \
+	@$(VENV_UVICORN) apps.api.main:app --reload --host 127.0.0.1 --port 8000 \
+		--reload-dir apps --reload-dir packages \
+		> /tmp/growpad_backend.log 2>&1 & \
 	echo $$! > /tmp/growpad_backend.pid && \
 	echo "✅ Backend started (PID: $$(cat /tmp/growpad_backend.pid))"
 	@sleep 2

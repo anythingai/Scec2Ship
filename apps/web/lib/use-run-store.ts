@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import { toast } from "sonner";
 import type {
   RunState,
   Stage,
@@ -467,6 +468,9 @@ export function useRunStore() {
           setStageStatus("AWAITING_APPROVAL", {
             status: "running",
             startedAt: payload.timestamp,
+          });
+          toast.info("PRD & design ready for review", {
+            description: "Approve or request changes in the Artifacts panel to continue.",
           });
         }
         if (

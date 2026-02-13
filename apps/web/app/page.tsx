@@ -92,6 +92,7 @@ export default function Page() {
             onDisconnectGitHub={disconnectGitHub}
             onLoadRunHistory={() => loadRunHistory(state.workspaceId)}
             onReplayRun={replayRun}
+            workspaceId={state.workspaceId}
           />
         </div>
         <div className="w-80 shrink-0">
@@ -145,6 +146,7 @@ export default function Page() {
               onDisconnectGitHub={disconnectGitHub}
               onLoadRunHistory={() => loadRunHistory(state.workspaceId)}
               onReplayRun={replayRun}
+              workspaceId={state.workspaceId}
             />
           </div>
         )}

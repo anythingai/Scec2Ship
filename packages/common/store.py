@@ -47,6 +47,8 @@ class WorkspaceStore:
             approvers=getattr(request, "approvers", []) or [],
             linear_url=getattr(request, "linear_url", None),
             jira_url=getattr(request, "jira_url", None),
+            integration_config=getattr(request, "integration_config", None) or {},
+            competitor_urls=getattr(request, "competitor_urls", None) or [],
             created_at=now,
             updated_at=now,
         )
@@ -65,6 +67,17 @@ class WorkspaceStore:
         workspace.github_token_encrypted = f"b64:{token_encoded}"
         workspace.updated_at = _now()
         write_json((WORKSPACES_DIR / workspace_id / "config.json"), workspace.model_dump(mode="json"))
+        return workspace
+
+    def connect_integration(self, workspace_id: str, provider: str, config: dict[str, Any]) -> WorkspaceConfig:
+        """Store integration config (api_key, etc.) for a provider. No secrets in logs."""
+        workspace = self.get(workspace_id)
+        if not hasattr(workspace, "integration_config") or workspace.integration_config is None:
+            workspace.integration_config = {}
+        workspace.integration_config = dict(workspace.integration_config)
+        workspace.integration_config[provider.lower()] = config
+        workspace.updated_at = _now()
+        write_json(WORKSPACES_DIR / workspace_id / "config.json", workspace.model_dump(mode="json"))
         return workspace
 
 

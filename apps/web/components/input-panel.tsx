@@ -1,9 +1,9 @@
 "use client"
 
-import React from "react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import React, { useCallback, useEffect, useRef, useState } from "react"
 import type { EvidenceFile, RunHistoryItem, RunState, RunStatus, Workspace } from "@/lib/types"
 import { Button } from "@/components/ui/button"
+import { toast } from "sonner"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -18,6 +18,7 @@ interface InputPanelProps {
   useSample: boolean
   fastMode: boolean
   designSystemTokens: string
+  workspaceId?: string | null
   onUpdateWorkspace: (updates: Partial<Workspace>) => void
   onUpdateGuardrails: (updates: Partial<Workspace["guardrails"]>) => void
   onSetEvidenceFiles: (files: EvidenceFile[]) => void
@@ -86,16 +87,24 @@ function EvidenceQualityMeter({ files }: { files: EvidenceFile[] }) {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || (typeof window !== "undefined" ? window.location.origin : "")
 
-function IntegrationsSection({ disabled }: { disabled: boolean }) {
-  const [integrations, setIntegrations] = useState<{ provider: string; status: string }[]>([])
+function IntegrationsSection({ disabled, workspaceId }: { disabled: boolean; workspaceId?: string | null }) {
   const [expanded, setExpanded] = useState(false)
+  const [integrations, setIntegrations] = useState<Array<{ provider: string; status: string; last_sync?: string }>>([])
+  const connectors = [
+    { id: "gong", name: "Gong" },
+    { id: "intercom", name: "Intercom" },
+    { id: "linear", name: "Linear" },
+    { id: "posthog", name: "PostHog" },
+    { id: "slack", name: "Slack" },
+  ]
   useEffect(() => {
-    if (!API_BASE) return
-    fetch(`${API_BASE}/integrations`)
-      .then((r) => r.ok ? r.json() : { integrations: [] })
+    if (!workspaceId || !API_BASE || !expanded) return
+    fetch(`${API_BASE}/integrations?workspace_id=${workspaceId}`)
+      .then((r) => (r.ok ? r.json() : { integrations: [] }))
       .then((d) => setIntegrations(d.integrations || []))
-      .catch(() => {})
-  }, [])
+      .catch(() => setIntegrations([]))
+  }, [workspaceId, expanded])
+  const statusByProvider = Object.fromEntries(integrations.map((i) => [i.provider, i]))
   return (
     <div className="rounded-md border border-border bg-secondary/40">
       <button
@@ -106,24 +115,119 @@ function IntegrationsSection({ disabled }: { disabled: boolean }) {
       >
         <span className="text-xs font-medium text-foreground">Integrations</span>
         <span className="text-[10px] text-muted-foreground">
-          {integrations.filter((i) => i.status === "connected").length}/{integrations.length} connected
+          {workspaceId ? (integrations.length ? "View status" : "Expand to load") : "Start run to configure"}
         </span>
       </button>
       {expanded && (
         <div className="border-t border-border px-3 py-2 space-y-1">
-          {integrations.map((i) => (
-            <div key={i.provider} className="flex items-center justify-between text-[10px]">
-              <span className="capitalize text-foreground">{i.provider}</span>
-              <Badge
-                variant="outline"
-                className={`h-5 text-[10px] ${i.status === "connected" ? "border-success/30 text-success" : "border-muted-foreground/30 text-muted-foreground"}`}
-              >
-                {i.status}
-              </Badge>
+          {connectors.map(({ id, name }) => {
+            const status = statusByProvider[id]
+            return (
+              <div key={id} className="flex items-center justify-between text-[10px]">
+                <span className="text-foreground">{name}</span>
+                <Badge
+                  variant="outline"
+                  className={`h-5 text-[10px] ${
+                    status?.status === "connected"
+                      ? "border-success/30 text-success"
+                      : status?.status === "configured"
+                        ? "border-primary/30 text-primary"
+                        : "border-muted-foreground/30 text-muted-foreground"
+                  }`}
+                >
+                  {status?.status || "disconnected"}
+                </Badge>
+              </div>
+            )
+          })}
+          <p className="text-[10px] text-muted-foreground pt-1">
+            POST /integrations/{"{provider}"}/connect with workspace_id. Sync via POST /integrations/{"{provider}"}/sync.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function WorkspaceInsightsSection({ disabled, workspaceId }: { disabled: boolean; workspaceId: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const [nightlyLoading, setNightlyLoading] = useState(false)
+  const [competitorGap, setCompetitorGap] = useState<{ gaps: Array<{ feature: string; competitors: string[]; priority: string }> } | null>(null)
+  const [confidenceAlerts, setConfidenceAlerts] = useState<{ alerts: Array<{ feature: string; message: string }>; count: number } | null>(null)
+  useEffect(() => {
+    if (!expanded || !workspaceId || !API_BASE) return
+    fetch(`${API_BASE}/competitor-gap?workspace_id=${workspaceId}`)
+      .then((r) => (r.ok ? r.json() : { gaps: [] }))
+      .then((d) => setCompetitorGap(d))
+      .catch(() => setCompetitorGap(null))
+    fetch(`${API_BASE}/workspaces/${workspaceId}/confidence-alerts`)
+      .then((r) => (r.ok ? r.json() : { alerts: [], count: 0 }))
+      .then((d) => setConfidenceAlerts(d))
+      .catch(() => setConfidenceAlerts(null))
+  }, [expanded, workspaceId])
+  const runNightlySynthesis = async () => {
+    if (!workspaceId || !API_BASE || disabled) return
+    setNightlyLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/workspaces/${workspaceId}/nightly-synthesis`, { method: "POST" })
+      const d = await res.json()
+      if (res.ok) {
+        toast.success("Nightly synthesis completed", {
+          description: `Claims: ${d.claims_count ?? 0}, Features: ${d.top_features_count ?? 0}`,
+        })
+      } else {
+        toast.error("Nightly synthesis failed")
+      }
+    } catch {
+      toast.error("Nightly synthesis failed")
+    } finally {
+      setNightlyLoading(false)
+    }
+  }
+  return (
+    <div className="rounded-md border border-border bg-secondary/40">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        disabled={disabled}
+        className="w-full flex items-center justify-between px-3 py-2 text-left disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <span className="text-xs font-medium text-foreground">Workspace insights</span>
+        <span className="text-[10px] text-muted-foreground">Nightly synthesis, competitor gap, alerts</span>
+      </button>
+      {expanded && (
+        <div className="border-t border-border px-3 py-2 space-y-3">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 w-full text-xs"
+            onClick={runNightlySynthesis}
+            disabled={disabled || nightlyLoading}
+          >
+            {nightlyLoading ? "Running..." : "Run Nightly Synthesis"}
+          </Button>
+          {competitorGap && competitorGap.gaps?.length > 0 && (
+            <div>
+              <span className="text-[10px] font-medium text-muted-foreground">Competitor gap</span>
+              <ul className="mt-1 space-y-0.5">
+                {competitorGap.gaps.slice(0, 3).map((g, i) => (
+                  <li key={i} className="text-[10px]">
+                    {g.feature} — {g.competitors?.join(", ")} ({g.priority})
+                  </li>
+                ))}
+              </ul>
             </div>
-          ))}
-          <p className="text-[10px] text-muted-foreground pt-1">Live connectors: Gong, Intercom, Linear, PostHog, Slack</p>
-          <p className="text-[10px] text-muted-foreground/70">Last sync: — (connect to enable)</p>
+          )}
+          {confidenceAlerts && confidenceAlerts.count > 0 && (
+            <div>
+              <span className="text-[10px] font-medium text-muted-foreground">Confidence alerts</span>
+              <ul className="mt-1 space-y-0.5">
+                {confidenceAlerts.alerts.slice(0, 3).map((a, i) => (
+                  <li key={i} className="text-[10px] text-foreground">{a.feature}: {a.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -281,6 +385,7 @@ export function InputPanel({
   onDisconnectGitHub,
   onLoadRunHistory,
   onReplayRun,
+  workspaceId,
 }: InputPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -533,7 +638,10 @@ export function InputPanel({
                   {gitHub.connected ? "Disconnect" : "Connect with GitHub"}
                 </Button>
               </div>
-              <IntegrationsSection disabled={isDisabled} />
+              <IntegrationsSection disabled={isDisabled} workspaceId={workspaceId} />
+              {workspaceId && (
+                <WorkspaceInsightsSection disabled={isDisabled} workspaceId={workspaceId} />
+              )}
               <div>
                 <Label htmlFor="repoUrl" className="text-xs text-muted-foreground">Repository URL</Label>
                 <Input
@@ -610,6 +718,8 @@ export function InputPanel({
                 </div>
                 <button
                   type="button"
+                  title="Toggle approval workflow"
+                  aria-label={workspace.approvalWorkflowEnabled ? "Disable approval workflow" : "Enable approval workflow"}
                   onClick={() => onUpdateWorkspace({ approvalWorkflowEnabled: !(workspace.approvalWorkflowEnabled ?? false) })}
                   disabled={isDisabled}
                   className={`relative h-6 w-11 rounded-full transition-colors ${

@@ -21,7 +21,14 @@ def build_manifest(artifacts_dir: Path) -> dict[str, Any]:
     return manifest
 
 
+REQUIRED_ARTIFACTS = frozenset({
+    "PRD.md", "wireframes.html", "user-flow.mmd", "tickets.json",
+    "evidence-map.json", "diff.patch", "test-report.md", "run-log.jsonl",
+})
+
+
 def package_artifacts(artifacts_dir: Path) -> Path:
+    """Package all artifacts into zip. Includes run-log.jsonl per PRD AC-4."""
     build_manifest(artifacts_dir)
     zip_path = artifacts_dir / "artifacts.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
