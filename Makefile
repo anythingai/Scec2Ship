@@ -2,7 +2,7 @@ VENV_PYTHON ?= .venv/bin/python
 VENV_UVICORN ?= .venv/bin/uvicorn
 NPM ?= npm
 
-.PHONY: run run-backend run-frontend run-all test check clean-runtime help stop
+.PHONY: run run-backend run-frontend run-all test check clean-runtime help stop demo demo-smoke
 
 help:
 	@echo "Available targets:"
@@ -15,6 +15,8 @@ help:
 	@echo "  make test-unit    - Run backend tests excluding integration (recommended for CI)"
 	@echo "  make check        - Run test-unit, lint, typecheck, build (CI verification)"
 	@echo "  make clean-runtime - Clean runtime data (runs/workspaces)"
+	@echo "  make demo         - Run demo mode with Docker (one-command)"
+	@echo "  make demo-smoke  - Run demo smoke test"
 
 run:
 	@echo ""
@@ -105,3 +107,13 @@ clean-runtime:
 	mkdir -p data/runs data/workspaces
 	touch data/runs/.gitkeep data/workspaces/.gitkeep
 	@echo "✅ Runtime data cleaned"
+
+demo:
+	@echo "Starting Growpad Demo Mode..."
+	@echo "Demo mode: ON, Failure injection: ON"
+	docker compose -f docker-compose.demo.yml up --build --abort-on-container-exit
+
+demo-smoke:
+	@echo "Running demo smoke test..."
+	@$(VENV_PYTHON) apps/api/tests/demo_smoke_test.py || exit 1
+	@echo "✅ Demo smoke test passed"

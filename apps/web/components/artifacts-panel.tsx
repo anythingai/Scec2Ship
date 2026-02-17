@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { MermaidDiagram } from "./mermaid-diagram"
 import { RunSummaryCard } from "./run-summary"
+import { ScorecardPanel } from "./scorecard-panel"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || (typeof window !== "undefined" ? window.location.origin : "")
 
@@ -640,6 +641,7 @@ export function ArtifactsPanel({
           <TabsTrigger value="diff" className="text-xs h-7 data-[state=active]:bg-card">Diff</TabsTrigger>
           <TabsTrigger value="tests" className="text-xs h-7 data-[state=active]:bg-card">Tests</TabsTrigger>
           <TabsTrigger value="audit" className="text-xs h-7 data-[state=active]:bg-card">Audit</TabsTrigger>
+          <TabsTrigger value="scorecard" className="text-xs h-7 data-[state=active]:bg-card">Scorecard</TabsTrigger>
           {artifacts.decisionMemo && <TabsTrigger value="decisionMemo" className="text-xs h-7 data-[state=active]:bg-card">Decision Memo</TabsTrigger>}
           {artifacts.goToMarket && <TabsTrigger value="goToMarket" className="text-xs h-7 data-[state=active]:bg-card">GTM</TabsTrigger>}
           {artifacts.analyticsSpec && <TabsTrigger value="analyticsSpec" className="text-xs h-7 data-[state=active]:bg-card">Analytics</TabsTrigger>}
@@ -832,6 +834,12 @@ export function ArtifactsPanel({
                   })()}
                 </pre>
               </div>
+            </TabsContent>
+          )}
+
+          {status === "completed" && (
+            <TabsContent value="scorecard" className="mt-0 p-4">
+              <ScorecardPanel runId={runId} status={status} />
             </TabsContent>
           )}
 

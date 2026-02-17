@@ -32,6 +32,31 @@ from packages.tools.packager import package_artifacts
 from packages.tools.patcher import apply_patch
 from packages.tools.test_runner import run_verification
 
+# Demo and trace utilities
+try:
+    from apps.api.demo import (
+        inject_failure,
+        generate_fix_patch,
+        apply_fix_patch as demo_apply_fix_patch,
+        is_demo_enabled,
+        is_failure_injection_enabled,
+    )
+from packages.utils import (
+    get_or_create_recorder,
+    record_gemini_call,
+    finalize_trace,
+    generate_scorecard,
+    write_scorecard,
+)
+from packages.utils.repo_scanner import (
+    scan_repository,
+    generate_repo_map,
+    generate_handoff,
+)
+DEMO_AVAILABLE = True
+except ImportError:
+    DEMO_AVAILABLE = False
+
 
 def _safe_float(val: Any, default: float = 0.5) -> float:
     """Parse float from Gemini output; map High/Medium/Low to 0.8/0.5/0.2."""
@@ -60,6 +85,7 @@ class Orchestrator:
         self.run_store = run_store
         self.event_bus = event_bus
         self.gemini = GeminiClient(api_key=os.getenv("GEMINI_API_KEY", ""))
+        self._trace_recorders = {}  # run_id -> GeminiTraceRecorder
 
     def start_run(self, request: RunCreateRequest) -> RunSummary:
         workspace = self.workspace_store.get(request.workspace_id)
@@ -161,9 +187,31 @@ class Orchestrator:
         self.run_store.save_state(state)
         artifacts_dir = self.run_store.artifacts_dir(run_id)
 
+        # Initialize trace recorder if available
+        if DEMO_AVAILABLE:
+            try:
+                get_or_create_recorder(run_id, artifacts_dir)
+            except Exception:
+                pass  # Continue if trace init fails
+
         verify_result: dict[str, Any] | None = None
         evidence_map: dict[str, Any] | None = None
         files_changed: list[str] = []
+
+        # Inject demo failure if enabled
+        if DEMO_AVAILABLE and is_failure_injection_enabled():
+            try:
+                inject_result = inject_failure(TARGET_REPO_DIR)
+                if inject_result.get("injected"):
+                    self._event(
+                        run_id,
+                        StageId.INTAKE.value,
+                        "demo_failure_injected",
+                        "intentional_failure",
+                        error=None,
+                    )
+            except Exception:
+                pass  # Continue if demo injection fails
 
         try:
             # INTAKE
@@ -469,7 +517,68 @@ class Orchestrator:
             if db_migration:
                 write_text(artifacts_dir / "database-migration.sql", db_migration)
                 state.outputs_index["database_migration"] = "artifacts/database-migration.sql"
-            package_artifacts(artifacts_dir)
+
+            # Finalize gemini trace if available
+            if DEMO_AVAILABLE:
+                try:
+                    trace_path = finalize_trace(run_id)
+                    if trace_path and trace_path.exists():
+                        state.outputs_index["gemini_trace"] = "artifacts/gemini-trace.json"
+                except Exception:
+                    pass  # Continue if trace finalization fails
+
+            # Generate scorecard if available
+            if DEMO_AVAILABLE:
+                try:
+                    scorecard = generate_scorecard(
+                        artifacts_dir,
+                        retry_count=state.retry_count,
+                        test_exit_code=verify_result["exit_code"] if verify_result else 0,
+                    )
+                    write_scorecard(scorecard, artifacts_dir / "scorecard.json")
+                    state.outputs_index["scorecard"] = "artifacts/scorecard.json"
+                except Exception:
+                    pass  # Continue if scorecard generation fails
+
+            # Generate repo-map and handoff if available
+            if DEMO_AVAILABLE:
+                try:
+                    # Scan repository
+                    from packages.utils.repo_scanner import scan_repository, generate_repo_map, generate_handoff
+                    repo_info = scan_repository(TARGET_REPO_DIR)
+
+                    # Generate repo-map.md
+                    prd_summary = ""
+                    prd_file = artifacts_dir / "PRD.md"
+                    if prd_file.exists():
+                        prd_text = prd_file.read_text()
+                        # Get first paragraph as summary
+                        lines = [l for l in prd_text.split('\n') if l.strip()]
+                        if lines:
+                            prd_summary = lines[0]
+
+                    repo_map_content = generate_repo_map(repo_info, prd_summary)
+                    write_text(artifacts_dir / "repo-map.md", repo_map_content)
+                    state.outputs_index["repo_map"] = "artifacts/repo-map.md"
+
+                    # Generate handoff.md
+                    tickets_count = len(tickets.get("tickets", [])) if tickets else 0
+                    handoff_content = generate_handoff(
+                        repo_info,
+                        prd_summary,
+                        tickets_count,
+                        workspace.guardrails.max_retries,
+                    )
+                    write_text(artifacts_dir / "handoff.md", handoff_content)
+                    state.outputs_index["handoff"] = "artifacts/handoff.md"
+                except Exception:
+                    pass  # Continue if handoff generation fails
+
+            package_artifacts(
+                artifacts_dir,
+                stage_history=state.stage_history,
+                timestamps=state.timestamps,
+            )
             self._transition(state, StageId.EXPORT, "done")
 
             state.status = RunStatus.COMPLETED if verify_result and verify_result["exit_code"] == 0 else RunStatus.FAILED

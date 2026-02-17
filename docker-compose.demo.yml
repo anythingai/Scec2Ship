@@ -1,0 +1,102 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./apps/api/.env
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3-pro-preview}
+      - DEMO_MODE=true
+      - FAILURE_INJECT=true
+      - MAX_RETRIES=2
+    volumes:
+      - ./data/runs:/app/data/runs
+      - ./data/workspaces:/app/data/workspaces
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - API_BASE_URL=http://api:8000
+      - NEXT_PUBLIC_API_BASE=
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  demo-runner:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3-pro-preview}
+      - DEMO_MODE=true
+      - FAILURE_INJECT=true
+      - MAX_RETRIES=2
+    volumes:
+      - ./data/runs:/app/data/runs
+      - ./data/workspaces:/app/data/workspaces
+    depends_on:
+      - api
+    command: >
+      sh -c "
+        echo 'Starting Growpad Demo Mode...' &&
+        python -c \"
+        import os
+        import time
+        from packages.common.store import WorkspaceStore, RunStore, EventBus
+        from packages.agent.orchestrator import Orchestrator
+        from packages.common.models import WorkspaceCreateRequest, Guardrails
+        from packages.common.paths import SAMPLE_EVIDENCE_DIR
+
+        # Initialize stores
+        workspace_store = WorkspaceStore()
+        run_store = RunStore()
+        event_bus = EventBus()
+        orchestrator = Orchestrator(workspace_store, run_store, event_bus)
+
+        # Create demo workspace
+        workspace = workspace_store.create(
+            team_name='Demo Team',
+            repo_url='local://target-repo',
+            branch='main',
+            guardrails=Guardrails(max_retries=2, mode='read_only', forbidden_paths=['/infra', '/payments']),
+        )
+
+        print(f'Workspace created: {workspace.workspace_id}')
+
+        # Start demo run with sample evidence
+        from packages.common.models import RunCreateRequest
+        request = RunCreateRequest(
+            workspace_id=workspace.workspace_id,
+            use_sample=True,
+            fast_mode=False,
+            selected_feature_index=0,
+        )
+
+        summary = orchestrator.start_run(request)
+        print(f'Run started: {summary.run_id}')
+
+        # Wait for completion (up to 5 minutes)
+        for i in range(60):
+            time.sleep(5)
+            state = run_store.load_state(summary.run_id)
+            print(f'Status: {state.status.value}, Stage: {state.current_stage}, Retries: {state.retry_count}')
+
+            if state.status.value in ['completed', 'failed']:
+                print(f'Run finished: {state.status.value}')
+                print(f'Artifacts at: data/runs/{summary.run_id}/artifacts.zip')
+                break
+
+        exit(0 if state.status.value == 'completed' else 1)
+        \"
+      "
+    restart: "no"
